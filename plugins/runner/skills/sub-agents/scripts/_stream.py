@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from io import StringIO
 from typing import Callable
 
 from _constants import SUPPORTED_CLIS_HELP
@@ -67,6 +69,60 @@ def _grok_json_result(data: StreamData) -> StreamData | None:
         "stop_reason": data.get("stopReason"),
         "session_id": data.get("sessionId"),
     }
+
+
+class JSONEventDecoder:
+    """Frame consecutive JSON objects/arrays across reads in linear time.
+
+    Ignore non-JSON diagnostic lines. Keep nesting and quote state so nested
+    objects are never mistaken for terminal events. Decode only once a whole
+    value is framed, and bound both valid and malformed unfinished values.
+    """
+
+    def __init__(self, max_chars: int) -> None:
+        self.max_chars = max_chars
+        self.buffer = StringIO()
+        self.size = 0
+        self.depth = 0
+        self.in_string = False
+        self.escaped = False
+        self.noise = False
+
+    def feed(self, chunk: str) -> Iterator[str]:
+        for char in chunk:
+            if not self.depth:
+                if char == "\n":
+                    self.noise = False
+                elif not self.noise and char in "{[":
+                    self.depth = 1
+                    self.buffer.write(char)
+                    self.size = 1
+                elif not char.isspace():
+                    self.noise = True
+                continue
+            self.buffer.write(char)
+            self.size += 1
+            if self.size > self.max_chars:
+                raise ValueError("Sub-agent JSON event exceeded maximum length")
+            if self.in_string:
+                if self.escaped:
+                    self.escaped = False
+                elif char == "\\":
+                    self.escaped = True
+                elif char == '"':
+                    self.in_string = False
+            elif char == '"':
+                self.in_string = True
+            elif char in "{[":
+                self.depth += 1
+            elif char in "}]":
+                self.depth -= 1
+                if not self.depth:
+                    value = self.buffer.getvalue()
+                    self.buffer.seek(0)
+                    self.buffer.truncate()
+                    self.size = 0
+                    yield value
 
 
 class StreamProcessor:

@@ -335,3 +335,33 @@ def test_grok_current_end_turn_spelling() -> None:
     result = processor.get_result()
     assert result is not None
     assert result["status"] == "success"
+
+
+def test_incremental_mixed_json_and_nested_event() -> None:
+    from _stream import JSONEventDecoder
+
+    decoder = JSONEventDecoder(4096)
+    processor = StreamProcessor("cursor-agent")
+    wire = (
+        'diagnostic line\n{"type":"system","session_id":"s"}\n'
+        '[{"type":"result","result":"not terminal"}]\n'
+        '{\n "type":"result", "result":"braces } { and \\"quote\\"",\n'
+        ' "nested":{"type":"result","result":"nested"}\n}'
+        '{"type":"result","result":"late"}\n'
+    )
+    for char in wire:
+        for event in decoder.feed(char):
+            processor.process_line(event)
+    result = processor.get_result()
+    assert result is not None
+    assert result["result"] == 'braces } { and "quote"'
+    assert result["session_id"] == "s"
+
+
+def test_incremental_decoder_bounds_unfinished_object() -> None:
+    import pytest
+    from _stream import JSONEventDecoder
+
+    decoder = JSONEventDecoder(16)
+    with pytest.raises(ValueError, match="JSON event exceeded"):
+        list(decoder.feed('{\n"unfinished":"' + "a" * 20))

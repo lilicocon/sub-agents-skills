@@ -34,7 +34,7 @@ class ProcessInvocation:
 class BackendSpec:
     """Backend capabilities that participate in command construction."""
 
-    builder: Callable[[AgentInvocation], ProcessInvocation]
+    builder: Callable[[AgentInvocation, Mapping[str, str]], ProcessInvocation]
     permissions: Mapping[str, tuple[str, ...]]
     effort_option: str | None
 
@@ -186,14 +186,14 @@ def _concatenated_args(
     return ProcessInvocation(command, perm_flags + base_args, env)
 
 
-def _build_claude_args(inv: AgentInvocation) -> ProcessInvocation:
+def _build_claude_args(inv: AgentInvocation, environment: Mapping[str, str]) -> ProcessInvocation:
     perm = _invocation_flags(inv)
     system_prompt = f"cwd: {inv.cwd}\n\n{inv.system_context}"
     command, base_args = build_command(inv.cli, inv.prompt)
     return ProcessInvocation(command, perm + ["--append-system-prompt", system_prompt] + base_args)
 
 
-def _build_gemini_args(inv: AgentInvocation) -> ProcessInvocation:
+def _build_gemini_args(inv: AgentInvocation, environment: Mapping[str, str]) -> ProcessInvocation:
     perm = _invocation_flags(inv)
     if inv.agent_file:
         command, base_args = build_command(inv.cli, inv.prompt)
@@ -201,12 +201,14 @@ def _build_gemini_args(inv: AgentInvocation) -> ProcessInvocation:
     return _concatenated_args(inv, perm, env=None)
 
 
-def _build_concatenated_args(inv: AgentInvocation) -> ProcessInvocation:
+def _build_concatenated_args(
+    inv: AgentInvocation, environment: Mapping[str, str]
+) -> ProcessInvocation:
     perm = _invocation_flags(inv)
     return _concatenated_args(inv, perm, env=None)
 
 
-def _build_grok_args(inv: AgentInvocation) -> ProcessInvocation:
+def _build_grok_args(inv: AgentInvocation, environment: Mapping[str, str]) -> ProcessInvocation:
     perm = _invocation_flags(inv)
     formatted_prompt = format_concatenated_prompt(inv.system_context, inv.prompt)
     command, base_args = build_command(inv.cli, formatted_prompt)
@@ -231,7 +233,7 @@ _OPENCODE_PERMISSION_MAPPING = {
 }
 
 
-def _build_opencode_args(inv: AgentInvocation) -> ProcessInvocation:
+def _build_opencode_args(inv: AgentInvocation, environment: Mapping[str, str]) -> ProcessInvocation:
     perm = _invocation_flags(inv)
     formatted_prompt = format_concatenated_prompt(inv.system_context, inv.prompt)
     command, base_args = build_command(inv.cli, formatted_prompt)
@@ -245,17 +247,17 @@ _GLM_BASE_URL = "https://api.z.ai/api/anthropic"
 _KIMI_BASE_URL = "https://api.kimi.com/coding/"
 
 
-def _resolve_provider_api_key(env_name: str) -> str | None:
+def _resolve_provider_api_key(env_name: str, environment: Mapping[str, str]) -> str | None:
     """Resolve a non-blank provider-specific API key."""
-    api_key = os.environ.get(env_name)
+    api_key = environment.get(env_name)
     return api_key if api_key and api_key.strip() else None
 
 
 # Auto-updates can bypass README, so errors name the replacement credential
 # for the calling LLM to relay to existing users.
-def _legacy_api_key_is_set() -> bool:
+def _legacy_api_key_is_set(environment: Mapping[str, str]) -> bool:
     """Check only whether the removed generic credential is present."""
-    return "CLI_API_KEY" in os.environ
+    return "CLI_API_KEY" in environment
 
 
 def _build_redirected_claude_args(
@@ -280,11 +282,11 @@ def _build_redirected_claude_args(
     )
 
 
-def _build_glm_args(inv: AgentInvocation) -> ProcessInvocation:
+def _build_glm_args(inv: AgentInvocation, environment: Mapping[str, str]) -> ProcessInvocation:
     """Route a Claude CLI invocation to Z.ai for GLM."""
-    api_key = _resolve_provider_api_key("GLM_API_KEY")
+    api_key = _resolve_provider_api_key("GLM_API_KEY", environment)
     if api_key is None:
-        if _legacy_api_key_is_set():
+        if _legacy_api_key_is_set(environment):
             raise ValueError(
                 "GLM configuration error: CLI_API_KEY is set but no longer supported. "
                 "Set GLM_API_KEY to a valid Z.ai API token and retry."
@@ -296,11 +298,11 @@ def _build_glm_args(inv: AgentInvocation) -> ProcessInvocation:
     return _build_redirected_claude_args(inv, api_key, _GLM_BASE_URL, "ANTHROPIC_AUTH_TOKEN")
 
 
-def _build_kimi_args(inv: AgentInvocation) -> ProcessInvocation:
+def _build_kimi_args(inv: AgentInvocation, environment: Mapping[str, str]) -> ProcessInvocation:
     """Route a Claude CLI invocation to Kimi Code."""
-    api_key = _resolve_provider_api_key("KIMI_API_KEY")
+    api_key = _resolve_provider_api_key("KIMI_API_KEY", environment)
     if api_key is None:
-        if _legacy_api_key_is_set():
+        if _legacy_api_key_is_set(environment):
             raise ValueError(
                 "Kimi configuration error: CLI_API_KEY is set but no longer supported. "
                 "Set KIMI_API_KEY to a valid Kimi API key and retry."
@@ -312,14 +314,14 @@ def _build_kimi_args(inv: AgentInvocation) -> ProcessInvocation:
     return _build_redirected_claude_args(inv, api_key, _KIMI_BASE_URL, "ANTHROPIC_API_KEY")
 
 
-def _build_cursor_args(inv: AgentInvocation) -> ProcessInvocation:
+def _build_cursor_args(inv: AgentInvocation, environment: Mapping[str, str]) -> ProcessInvocation:
     perm = _invocation_flags(inv)
     # Keep the credential out of argv; logged-in sessions need no override.
-    api_key = _resolve_provider_api_key("CURSOR_API_KEY")
+    api_key = _resolve_provider_api_key("CURSOR_API_KEY", environment)
     env_override = {}
-    if "CURSOR_API_KEY" in os.environ:
+    if "CURSOR_API_KEY" in environment:
         env_override["CURSOR_API_KEY"] = api_key
-    if _legacy_api_key_is_set():
+    if _legacy_api_key_is_set(environment):
         env_override["CLI_API_KEY"] = None
     return _concatenated_args(inv, perm, env=env_override or None)
 
@@ -338,11 +340,13 @@ _BACKEND_SPECS = {
 }
 
 
-def build_invocation_args(inv: AgentInvocation) -> ProcessInvocation:
+def build_invocation_args(
+    inv: AgentInvocation, environment: Mapping[str, str] | None = None
+) -> ProcessInvocation:
     try:
         builder = _BACKEND_SPECS[inv.cli].builder
     except KeyError as e:
         raise ValueError(
             f"Unsupported CLI {inv.cli!r}. Choose one of: {SUPPORTED_CLIS_HELP}."
         ) from e
-    return builder(inv)
+    return builder(inv, os.environ if environment is None else environment)

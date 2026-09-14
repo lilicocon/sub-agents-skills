@@ -4,6 +4,9 @@ Run commands with `python {SKILL_DIR}/scripts/tasks.py`. No third-party Python
 runtime dependencies, web service, API gateway, or extra credentials are needed.
 Use the local CLI login or its supported environment variables.
 
+See [installation and custom-agent configuration](install-and-configure.md) for
+local installation, backend login, persistent roles and upgrade instructions.
+
 ## Commands
 
 The global `--state-dir PATH` goes **before** the command. Default state is
@@ -31,6 +34,13 @@ and the script when directories contain spaces. macOS/Linux use process groups
 and an owner-pipe watchdog, and also signal POSIX descendants that left the
 original session; Windows assigns a gated launcher to a kill-on-close
 Job Object **before** it can launch a backend. Isolation failure aborts the run.
+
+On POSIX, an inherited `SUB_AGENTS_PROCESS_OWNER` marker supplements ancestry so
+cleanup can find descendants after setsid or reparenting. Keep this marker when
+constructing child environments. This is lifecycle cleanup, not a security
+sandbox: descendants that both clear the marker and leave the session require
+OS-level containment for reliable termination.
+
 A complete JSON result, including pretty-printed payloads, ends the run; a
 lingering process after that result is cleaned up rather than reported as a
 timeout.
@@ -73,6 +83,7 @@ A supervisor stays resident until `shutdown`; no terminal window is required.
 
 ## Git integration
 
+Git must be available on PATH for workspace detection, including non-Git tasks.
 Git writers start from the recorded clean HEAD in a `runner/<task-id>` branch and
 an independent worktree. A dirty source tree fails submission. Git errors other
 than "not a git repository" fail closed; they do not fall back to writing in the
@@ -88,13 +99,29 @@ and its branch merged into the source repository's current HEAD; it also refuses
 if another task still uses that worktree. Squashed or cherry-picked histories
 may need manual cleanup after inspecting equivalence.
 
+Submit and cleanup share a lifecycle lock and a task-store registry in the Git
+common directory, outside linked worktrees. This also protects shared worktrees
+across state directories registered by new submissions. Existing holders in the
+current state directory remain protected, but old submissions in other,
+unregistered state directories cannot be discovered automatically.
+
 ## Failures and upgrades
 
 - Authentication/workspace trust: inspect stderr and `doctor`; log in directly
   to the affected CLI. Do not put credentials in prompts or task files.
 - Worker failure: inspect partial logs/artifacts before submitting `--retry-of`.
 - Unexpected output format: raw logs remain available; parser failure stays an error.
-- Stop jobs before upgrading the plugin. Task state survives reinstall, but
-  background Python processes load modules from their installed script path.
+- Before upgrading, finish/cancel old tasks and stop supervisors in **every**
+  state directory you use, including custom `--state-dir`/`SUB_AGENTS_STATE_DIR`
+  locations. Old processes do not use the new cross-state lifecycle lock and
+  registry. Task state survives reinstall, but background Python processes load
+  modules from their installed script path.
 - All logs are local and may contain code/model output. Cleanup is explicit;
   do not share the state directory as part of a repository commit.
+
+Workspace lifecycle locks and the task-store registry live in the Git common
+directory, outside linked worktrees. New submissions register their state
+directory so cleanup can check holders across registered stores. Historical
+tasks in the current store are also checked; other stores used only by older
+versions are not registered. Finish old tasks and stop supervisors in every
+custom state directory before upgrading. Non-Git lifecycle locks are per store.

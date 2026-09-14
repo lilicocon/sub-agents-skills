@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import queue
 import shutil
@@ -9,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Callable, TypedDict
@@ -16,7 +16,7 @@ from typing import IO, Callable, TypedDict
 from _builder import AgentInvocation, ProcessInvocation, build_invocation_args
 from _constants import DEFAULT_TIMEOUT_MS
 from _process import ProcessTree, launch
-from _stream import StreamData, StreamProcessor
+from _stream import JSONEventDecoder, StreamData, StreamProcessor
 
 
 class _AgentResponseFields(TypedDict):
@@ -57,12 +57,15 @@ _CURSOR_AUTH_ERROR_PHRASES = (
 )
 
 
-def _cursor_legacy_key_guidance(error: str) -> str | None:
+def _cursor_legacy_key_guidance(
+    error: str, environment: Mapping[str, str] | None = None
+) -> str | None:
     """Give the calling LLM migration guidance when legacy config explains auth failure."""
-    if "CLI_API_KEY" not in os.environ:
+    environment = os.environ if environment is None else environment
+    if "CLI_API_KEY" not in environment:
         return None
 
-    cursor_api_key = os.environ.get("CURSOR_API_KEY")
+    cursor_api_key = environment.get("CURSOR_API_KEY")
     if cursor_api_key and cursor_api_key.strip():
         return None
 
@@ -117,7 +120,12 @@ def _classify_status(result: StreamData | None, exit_code: int, *, terminated_by
     return "partial"
 
 
-def _error_message(response: AgentResponse, result: StreamData | None, stderr: str) -> str:
+def _error_message(
+    response: AgentResponse,
+    result: StreamData | None,
+    stderr: str,
+    environment: Mapping[str, str] | None = None,
+) -> str:
     result_error = result.get("error") if result else None
     result_subtype = result.get("subtype") if result else None
     result_text = result.get("result") if result else None
@@ -141,7 +149,7 @@ def _error_message(response: AgentResponse, result: StreamData | None, stderr: s
         # With no parsed result the response carries the joined stdout.
         if result is None and isinstance(output, str):
             error_context += f"\n{output[:8192]}"
-        msg = _cursor_legacy_key_guidance(error_context) or msg
+        msg = _cursor_legacy_key_guidance(error_context, environment) or msg
     return msg
 
 
@@ -154,6 +162,7 @@ def build_final_response(  # noqa: PLR0913
     stdout_lines: list[str],
     stderr: str,
     terminated_by_us: bool = False,
+    environment: Mapping[str, str] | None = None,
 ) -> AgentResponse:
     exit_code = returncode if returncode is not None else 1
     status = _classify_status(result, exit_code, terminated_by_us=terminated_by_us)
@@ -172,7 +181,7 @@ def build_final_response(  # noqa: PLR0913
     if metadata:
         response["metadata"] = metadata
     if status == "error":
-        response["error"] = _error_message(response, result, stderr)
+        response["error"] = _error_message(response, result, stderr, environment)
     return response
 
 
@@ -180,13 +189,6 @@ def build_final_response(  # noqa: PLR0913
 _MAX_STDOUT_CHARS = 64 * 1024 * 1024
 _MAX_LINE_CHARS = 4 * 1024 * 1024
 _GRACE_SECONDS = 1.0
-
-
-def _is_json_object(text: str) -> bool:
-    try:
-        return isinstance(json.loads(text), dict)
-    except json.JSONDecodeError:
-        return False
 
 
 @dataclass
@@ -248,7 +250,7 @@ def _drive_process(
     terminal_at: float | None = None
     terminated = False
     failure: tuple[int, str] | None = None
-    saw_json_line = False
+    decoder = JSONEventDecoder(_MAX_STDOUT_CHARS)
     logs: dict[str, IO[str]] = {}
     try:  # noqa: PLR1702
         if options.log_dir:
@@ -276,10 +278,6 @@ def _drive_process(
                 continue
             if chunk is None:
                 eof.add(name)
-                if name == "stdout" and pending:
-                    if processor.process_line(pending):
-                        terminal_at = time.monotonic()
-                    pending = ""
                 continue
             count += len(chunk)
             if count > _MAX_STDOUT_CHARS:
@@ -297,20 +295,14 @@ def _drive_process(
                 failure = (1, "Sub-agent output line exceeded maximum length")
                 break
             if pending.endswith("\n"):
-                if _is_json_object(pending):
-                    saw_json_line = True
-                if processor.process_line(pending):
-                    terminal_at = time.monotonic()
                 pending = ""
-            if (
-                processor.get_result() is None
-                and not saw_json_line
-                and "}" in chunk
-                and processor.process_complete_output("".join(chunks))
-            ):
-                terminal_at = time.monotonic()
-        if processor.get_result() is None:
-            processor.process_complete_output("".join(chunks))
+            try:
+                for event in decoder.feed(chunk):
+                    if processor.process_line(event):
+                        terminal_at = time.monotonic()
+            except ValueError as decode_error:
+                failure = (1, str(decode_error))
+                break
         if failure:
             if failure[0] == 124 and processor.get_result() is not None:
                 terminated = process.poll() is None
@@ -321,6 +313,7 @@ def _drive_process(
                     stdout_lines=chunks,
                     stderr=stderr,
                     terminated_by_us=terminated,
+                    environment=options.environment,
                 )
             code, error = failure
             return _partial_response(cli, processor.get_result(), code, error)
@@ -331,6 +324,7 @@ def _drive_process(
             stdout_lines=chunks,
             stderr=stderr,
             terminated_by_us=terminated,
+            environment=options.environment,
         )
     finally:
         # Always clean descendants, including those keeping inherited pipes open.
@@ -394,7 +388,9 @@ def _spawn_and_drive(  # noqa: PLR0913
 
 
 def _isolated_opencode_env(
-    env_override: dict[str, str | None] | None, temp_dir: str
+    env_override: dict[str, str | None] | None,
+    temp_dir: str,
+    environment: Mapping[str, str] | None = None,
 ) -> dict[str, str | None]:
     """Isolate OpenCode state to prevent concurrent SQLite session locks."""
     data_home = os.path.join(temp_dir, "data")
@@ -402,12 +398,16 @@ def _isolated_opencode_env(
     os.makedirs(os.path.join(data_home, "opencode"))
     os.makedirs(state_home)
 
-    default_data_home = os.environ.get(
-        "XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share")
+    source_environment = os.environ if environment is None else environment
+    home = source_environment.get("HOME") or source_environment.get("USERPROFILE")
+    if home is None and environment is None:
+        home = os.path.expanduser("~")
+    default_data_home = source_environment.get("XDG_DATA_HOME") or (
+        os.path.join(home, ".local", "share") if home else ""
     )
     auth_file = os.path.join(default_data_home, "opencode", "auth.json")
     try:
-        if os.path.isfile(auth_file):
+        if default_data_home and os.path.isfile(auth_file):
             shutil.copy2(auth_file, os.path.join(data_home, "opencode", "auth.json"))
     except OSError:
         # OpenCode reports authentication failures when this copy was required.
@@ -424,13 +424,15 @@ def execute_agent(
     if timeout_ms <= 0:
         raise ValueError("timeout must be positive")
     options = options or ExecutionOptions()
-    process_invocation = build_invocation_args(inv)
+    process_invocation = build_invocation_args(inv, options.environment)
 
     if inv.cli == "opencode":
         temp_dir = tempfile.mkdtemp(prefix="subagent-opencode-")
         try:
             proc_env = _build_proc_env(
-                _isolated_opencode_env(process_invocation.env_override, temp_dir),
+                _isolated_opencode_env(
+                    process_invocation.env_override, temp_dir, options.environment
+                ),
                 options.environment,
             )
             return _spawn_and_drive(process_invocation, inv, proc_env, timeout_ms, options)

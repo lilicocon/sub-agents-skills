@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+
+from _state import FileLock
 
 
 def git_bytes(cwd: Path, *args: str) -> bytes:
@@ -26,8 +32,10 @@ def git(cwd: Path, *args: str) -> str:
 def snapshot(cwd: Path, *, write: bool) -> dict[str, object]:
     try:
         root = Path(git(cwd, "rev-parse", "--show-toplevel")).resolve()
-    except FileNotFoundError:
-        return {"repository": None, "base_commit": None, "relative_cwd": "."}
+    except FileNotFoundError as exc:
+        raise ValueError(
+            "Git is required to determine workspace isolation; install Git and check PATH"
+        ) from exc
     except ValueError as exc:
         if "not a git repository" in str(exc).lower():
             return {"repository": None, "base_commit": None, "relative_cwd": "."}
@@ -82,3 +90,50 @@ def evidence(task: dict[str, object], cwd: Path, task_dir: Path) -> dict[str, ob
 def overlaps(left: str, right: str) -> bool:
     a, b = Path(left).resolve(), Path(right).resolve()
     return a == b or a in b.parents or b in a.parents
+
+
+@contextmanager
+def lifecycle_lock(cwd: Path, fallback: Path) -> Iterator[Path]:
+    """Serialize submit/cleanup across state dirs sharing a Git common directory.
+
+    Lock discovery can race deletion, so callers must validate cwd again inside
+    the lock. The lock and registry live outside all linked worktrees.
+    """
+    try:
+        common = Path(git(cwd, "rev-parse", "--git-common-dir"))
+        directory = (cwd / common).resolve()
+    except FileNotFoundError as exc:
+        raise ValueError(
+            "Git is required to determine workspace isolation; install Git and check PATH"
+        ) from exc
+    except ValueError as exc:
+        if "not a git repository" not in str(exc).lower():
+            raise
+        directory = fallback
+    lock = FileLock(directory / "runner-workspace.lock")
+    deadline = time.monotonic() + 30
+    while not lock.acquire():
+        if time.monotonic() >= deadline:
+            raise ValueError("Workspace lifecycle is busy; retry shortly")
+        time.sleep(0.02)
+    try:
+        yield directory
+    finally:
+        lock.close()
+
+
+def registered_stores(directory: Path, current: Path) -> list[Path]:
+    """Read state roots while holding lifecycle_lock; stale missing roots are ignored."""
+    registry = directory / "runner-state-dirs.json"
+    roots: object = json.loads(registry.read_text(encoding="utf-8")) if registry.exists() else []
+    if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
+        raise ValueError("Invalid workspace task-store registry; retaining workspace")
+    return sorted({current.resolve(), *(Path(root) for root in roots)})
+
+
+def register_store(directory: Path, current: Path) -> None:
+    roots = registered_stores(directory, current)
+    registry = directory / "runner-state-dirs.json"
+    temporary = directory / "runner-state-dirs.json.tmp"
+    temporary.write_text(json.dumps([str(root) for root in roots]), encoding="utf-8")
+    temporary.replace(registry)

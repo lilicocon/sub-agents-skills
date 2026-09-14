@@ -735,3 +735,26 @@ class TestPermissionAppliedToCommand:
         assert "--sandbox" in process.args
         idx = process.args.index("--sandbox")
         assert process.args[idx + 1] == "workspace"
+
+
+@pytest.mark.parametrize(
+    ("cli", "key", "child_key"),
+    [
+        ("cursor-agent", "CURSOR_API_KEY", "CURSOR_API_KEY"),
+        ("glm", "GLM_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+        ("kimi", "KIMI_API_KEY", "ANTHROPIC_API_KEY"),
+    ],
+)
+def test_provider_uses_explicit_environment(cli: str, key: str, child_key: str) -> None:
+    with patch.dict(os.environ, {key: "supervisor"}, clear=True):
+        invocation = build_invocation_args(_inv(cli), {key: "submit"})
+    assert invocation.env_override is not None
+    assert invocation.env_override[child_key] == "submit"
+    with patch.dict(os.environ, {}, clear=True):
+        assert build_invocation_args(_inv(cli), {key: "submit"}) == invocation
+
+
+def test_empty_snapshot_never_falls_back_to_ambient_credentials() -> None:
+    with patch.dict(os.environ, {"GLM_API_KEY": "supervisor", "CLI_API_KEY": "legacy"}):
+        with pytest.raises(ValueError, match="GLM_API_KEY is unset"):
+            build_invocation_args(_inv("glm"), {})

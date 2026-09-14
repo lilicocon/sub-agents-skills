@@ -1,33 +1,28 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# sub-agents-skills installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/shinpr/sub-agents-skills/main/install.sh | bash -s -- --target <path>
-
+# Install skill files only; backend CLIs, login and personal roles are separate.
 TARGET=""
 SKILL_NAME=""
 REPO_URL="https://github.com/shinpr/sub-agents-skills"
+TEMP_DIR=""
+STAGE_DIR=""
+BACKUP=""
+DESTINATION=""
 
 usage() {
-    echo "Usage: $0 --target <install-path> [--skill <skill-name>]"
-    echo ""
-    echo "Options:"
-    echo "  --target <path>   Required. Directory to install skills into."
-    echo "                    Examples:"
-    echo "                      ~/.claude/skills      (Claude Code)"
-    echo "                      ~/.cursor/skills      (Cursor)"
-    echo "                      .github/skills        (VS Code/Copilot project)"
-    echo ""
-    echo "  --skill <name>    Optional. Install specific skill only."
-    echo "                    Default: install all skills."
-    echo ""
-    echo "Examples:"
-    echo "  $0 --target ~/.claude/skills"
-    echo "  $0 --target ~/.cursor/skills --skill sub-agents"
-    echo ""
-    echo "  # Via curl:"
-    echo "  curl -fsSL $REPO_URL/raw/main/install.sh | bash -s -- --target ~/.claude/skills"
-    exit 1
+    cat <<USAGE
+Usage: $0 --target <install-path> [--skill <skill-name>]
+
+  --target <path>   Required skills directory, e.g. ~/.codex/skills or ~/.cursor/skills
+  --skill <name>    Install one skill (default: all skills)
+  -h, --help       Show this help
+
+From a local checkout:
+  bash install.sh --target ~/.codex/skills --skill sub-agents
+
+Store personal roles in ~/.codex/worker-agents or project .agents, outside the installation.
+USAGE
 }
 
 error() {
@@ -35,91 +30,92 @@ error() {
     exit 1
 }
 
-# Parse arguments
+cleanup() {
+    local status=$?
+    # A failed publish must leave the previous installation available.
+    if [[ -n "$BACKUP" && -e "$BACKUP" && ! -e "$DESTINATION" ]]; then
+        if ! mv "$BACKUP" "$DESTINATION"; then
+            echo "Error: restore failed; previous installation remains at $BACKUP" >&2
+            STAGE_DIR=""
+            status=1
+        fi
+    fi
+    [[ -z "$STAGE_DIR" ]] || rm -rf "$STAGE_DIR"
+    [[ -z "$TEMP_DIR" ]] || rm -rf "$TEMP_DIR"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --target)
-            TARGET="$2"
+        --target|--skill)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || error "Missing value for $1"
+            if [[ "$1" == --target ]]; then TARGET="$2"; else SKILL_NAME="$2"; fi
             shift 2
             ;;
-        --skill)
-            SKILL_NAME="$2"
-            shift 2
-            ;;
-        -h|--help)
-            usage
-            ;;
-        *)
-            error "Unknown option: $1"
-            ;;
+        -h|--help) usage; exit 0 ;;
+        *) error "Unknown option: $1" ;;
     esac
 done
 
-# Validate target
-if [[ -z "$TARGET" ]]; then
-    echo "Error: --target is required." >&2
-    echo ""
-    usage
+[[ -n "$TARGET" ]] || error "--target is required (see --help)"
+if [[ -n "$SKILL_NAME" && ! "$SKILL_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+    error "Invalid skill name: $SKILL_NAME"
 fi
+case "$TARGET" in
+    '~') TARGET="$HOME" ;;
+    '~/'*) TARGET="$HOME/${TARGET:2}" ;;
+esac
 
-# Expand ~ to home directory
-TARGET="${TARGET/#\~/$HOME}"
-
-# Determine source directory
-# If running from curl, we need to clone/download first
-# If running locally, use the script's directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# BASH_SOURCE can be unset when the installer is piped to bash.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd -P)"
 SKILLS_SOURCE="$SCRIPT_DIR/skills"
-
-# Check if running from curl (no local skills directory)
 if [[ ! -d "$SKILLS_SOURCE" ]]; then
     echo "Downloading skills from repository..."
     TEMP_DIR=$(mktemp -d)
-    trap "rm -rf $TEMP_DIR" EXIT
-
-    git clone --depth 1 "$REPO_URL" "$TEMP_DIR" 2>/dev/null || \
-        error "Failed to clone repository. Please check the URL: $REPO_URL"
-
+    git clone --depth 1 "$REPO_URL" "$TEMP_DIR" || error "Failed to clone $REPO_URL"
     SKILLS_SOURCE="$TEMP_DIR/skills"
 fi
-
-# Verify skills source exists
-if [[ ! -d "$SKILLS_SOURCE" ]]; then
-    error "Skills directory not found: $SKILLS_SOURCE"
-fi
-
-# Create target directory
+[[ -d "$SKILLS_SOURCE" ]] || error "Skills directory not found: $SKILLS_SOURCE"
+SKILLS_SOURCE="$(cd "$SKILLS_SOURCE" && pwd -P)"
 mkdir -p "$TARGET"
+TARGET="$(cd "$TARGET" && pwd -P)"
+# Do not replace the checkout itself, including through a symlink.
+case "$TARGET/" in
+    "$SKILLS_SOURCE/"*) error "Install target must be outside source skills: $TARGET" ;;
+esac
+case "$SKILLS_SOURCE/" in
+    "$TARGET/"*) error "Install target must not contain source skills: $TARGET" ;;
+esac
 
-# Install skills
+STAGE_DIR=$(mktemp -d "$TARGET/.sub-agents-install.XXXXXX")
+mkdir "$STAGE_DIR/new" "$STAGE_DIR/old"
 installed=0
+for skill_dir in "$SKILLS_SOURCE"/*/; do
+    [[ -d "$skill_dir" ]] || continue
+    skill_name=$(basename "$skill_dir")
+    [[ -z "$SKILL_NAME" || "$skill_name" == "$SKILL_NAME" ]] || continue
+    [[ -f "$skill_dir/SKILL.md" ]] || continue
+    [[ ! -L "$TARGET/$skill_name" ]] || error "Refusing symlink destination: $TARGET/$skill_name"
+    # Stage every copy before changing any existing installation.
+    cp -R "${skill_dir%/}" "$STAGE_DIR/new/$skill_name"
+    installed=$((installed + 1))
+done
+[[ $installed -gt 0 ]] || error "No matching skills found: ${SKILL_NAME:-all}"
 
-if [[ -n "$SKILL_NAME" ]]; then
-    # Install specific skill
-    if [[ ! -d "$SKILLS_SOURCE/$SKILL_NAME" ]]; then
-        error "Skill not found: $SKILL_NAME"
+for staged in "$STAGE_DIR/new"/*/; do
+    skill_name=$(basename "$staged")
+    DESTINATION="$TARGET/$skill_name"
+    echo "Installing skill: $skill_name -> $DESTINATION"
+    BACKUP="$STAGE_DIR/old/$skill_name"
+    if [[ -e "$DESTINATION" ]]; then
+        mv "$DESTINATION" "$BACKUP"
     fi
+    mv "${staged%/}" "$DESTINATION"
+    BACKUP=""
+done
 
-    echo "Installing skill: $SKILL_NAME -> $TARGET/$SKILL_NAME"
-    rm -rf "$TARGET/$SKILL_NAME"
-    cp -r "$SKILLS_SOURCE/$SKILL_NAME" "$TARGET/"
-    installed=1
-else
-    # Install all skills
-    for skill_dir in "$SKILLS_SOURCE"/*/; do
-        if [[ -d "$skill_dir" ]]; then
-            skill_name=$(basename "$skill_dir")
-            echo "Installing skill: $skill_name -> $TARGET/$skill_name"
-            rm -rf "$TARGET/$skill_name"
-            cp -r "${skill_dir%/}" "$TARGET/"
-            ((installed++))
-        fi
-    done
-fi
-
-if [[ $installed -eq 0 ]]; then
-    error "No skills found to install"
-fi
-
-echo ""
 echo "Done! Installed $installed skill(s) to $TARGET"
+echo "Backend CLIs and their login are separate. Keep custom roles in project .agents or ~/.codex/worker-agents."

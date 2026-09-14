@@ -10,8 +10,16 @@ codex plugin marketplace add lilicocon/sub-agents-skills
 codex plugin add runner@sub-agents-skills
 ```
 
-本地开发版本可以先注册本仓库目录，然后安装同名插件。重启或新开 Codex
-会话，输入 `$runner:sub-agents` 并描述任务。CLI 登录需要预先完成。
+本地安装当前检出的版本（在仓库根目录运行）：
+
+```bash
+codex plugin marketplace add "$PWD"
+codex plugin add runner@sub-agents-skills
+```
+
+本地安装不需要提交或推送。修改已安装插件后，需要更新插件版本的缓存后缀并重新安装，
+才会复制新代码到缓存；直接编辑旧缓存不是持久配置方式。
+重启或新开 Codex 会话，输入 `$runner:sub-agents` 并描述任务。CLI 登录需要预先完成。
 
 源码直接运行：
 
@@ -52,7 +60,61 @@ python3 skills/sub-agents/scripts/tasks.py result TASK_ID
 
 ## 快速开始
 
-**环境要求：** Python 3.9 或更高版本，并且至少安装一个[支持的后端](#supported-backends)。
+**环境要求：** Python 3.9 或更高版本、PATH 中可用的 Git，并且至少安装一个[支持的后端](#supported-backends)。
+
+### 让 AI 帮你安装（可直接复制）
+
+将下面提示词发给有终端和文件操作能力的 AI 编程助手，仓库地址已填好，可直接复制。
+适用于首次安装和升级；如需安装其他 fork 或本地版本，替换第一行地址即可。
+
+助手先检测并列出角色和执行后端选项，由你选择，再完成全局配置。
+安装时选择角色与后端的对应关系；日常使用时由 AI 按任务自动发现并选择已配置角色。
+
+```text
+请帮我实际安装并配置这个仓库的 Sub-Agents Runner：https://github.com/lilicocon/sub-agents-skills。
+目标是配置跨项目可用的全局 agent：安装时由我选择角色及其执行后端，配置后由 AI 按任务自动发现并调用。
+
+先读目标仓库的 README、SKILL.md 和安装配置说明，检查操作系统、宿主客户端、Python、Git、
+可用后端 CLI、已有安装和配置。以目标仓库和本机 CLI 帮助为准，不要误装上游或其他 fork。
+
+分两阶段完成：先检测并让我选择，再按选择安装和配置。
+
+第一阶段：只读检测后列出可选配置，不自动替我决定角色与后端。
+- 用表格列出仓库支持的 backend、对应 CLI 是否安装、登录是否已验证或未知。
+  区分“支持但未安装”和“本机已安装”；不要猜测模型或登录状态。
+- 列出已有全局角色，并提出可选角色：researcher（调查）、implementer（实现）、reviewer（审查）；
+  Java 专项等角色按需要选择，不全部自动创建。说明每个角色的职责和权限。
+- 展示建议配置表：角色 → backend/run-agent → model/effort（默认沿用后端配置）→ 权限。
+  多个角色可以使用同一 backend；同一职责也可以配置多个不同名称的角色。
+- 集中询问我要启用哪些角色、每个角色使用哪个后端，以及是否沿用后端默认模型。
+  给出简短回答示例，如“调查和审查用 Grok，实现用 Cursor，模型默认，不加专项角色”。
+  如果我已明确给出这些选择，直接采用；否则等待我的选择，不把沉默当成同意。
+
+第二阶段：收到选择后完成以下工作，不重复询问已经确定的选项。
+1. 根据当前客户端选择插件或独立 Skill 安装，避免重复安装。保留已有配置和角色；
+   修改已有文件前备份并合并，不覆盖整份配置。升级前检查活动任务，不强行终止仍在执行的工作。
+2. 优先复用已安装的后端及现有登录、模型配置；不强制安装全部后端，不擅自更换模型。
+   按当前系统和官方安装方式补齐必要依赖及我选中的后端。交互登录由我完成，不向我索要明文密钥。
+3. 将跨项目角色放在 Runner 支持的全局角色目录，通常为 ~/.codex/worker-agents/，
+   不放进插件缓存，也不只在当前项目创建。仅创建或更新我选中的角色及其 run-agent；
+   调查与审查使用 read-only，实现使用 safe-edit。选用默认模型时省略 model 和 effort。
+   未选中的已有角色保持原样；内置角色仍可能通过回退发现，最终清单须区分全局角色和内置角色。
+   保留项目同名角色优先覆盖全局角色的能力，不随意设置会禁用回退的 SUB_AGENTS_DIR。
+4. 在当前客户端支持的全局指令入口中合并自动调度规则：适合委派时读取 Runner 技能，
+   用 tasks.py agents --cwd <当前项目绝对路径> 发现角色，根据职责选择，再使用 managed tasks
+   调度，优先选择我配置的全局角色，尊重项目显式覆盖及当次指定；无需每次让我指定角色名。
+   主助手负责跟踪、独立验证和最终交付，子 agent 不再派工；简单任务直接处理，
+   用户要求不派工时遵从。不要硬编码版本化插件缓存路径。
+   如果客户端不支持自动发现或全局指令，明确说明，并提供可用的显式调用方式。
+5. 使用安装后的代码运行 doctor、角色发现和配置验证，并在一个没有项目角色的临时目录中
+   验证全局角色可见、来源正确、backend 与我的选择一致；不把 doctor 成功当成登录验证，
+   不默认发送真实模型请求。需要真实调用才能验证的部分，单独列出。
+
+角色与后端选择由我决定，其余能从环境确定的安装细节直接处理。
+最后报告安装来源和版本、实际安装路径、修改及备份的文件、角色与后端对应关系、
+验证结果和未验证项，并给出一个调用示例及是否需要重启或新开会话。
+不要只给计划；完成可执行的安装配置。不提交、不推送、不修改 GitHub。
+```
 
 ### 1. 安装 Skill
 
@@ -113,6 +175,58 @@ git clone https://github.com/shinpr/sub-agents-skills.git
 cd sub-agents-skills
 ./install.sh --target <client-skill-path>
 ```
+
+### 安装与配置的区别
+
+安装 Skill/插件只安装 Runner；执行任务的后端 CLI 需要单独安装并登录。
+内置 `researcher`、`reviewer` 使用 Grok，`implementer` 使用 Cursor。
+**可以自定义 agent**：它是一个 Markdown 角色文件，可以选择后端、模型、权限和任务要求，
+也可以用同名文件覆盖内置角色。
+
+本地代码可这样安装和检查（独立 Skill 与插件选一种，避免重复安装）：
+
+```sh
+bash install.sh --target "$HOME/.codex/skills" --skill sub-agents
+RUNNER_SKILL_DIR="$HOME/.codex/skills/sub-agents"
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" doctor
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" agents --cwd "$PWD"
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" configure --max-parallel 2
+```
+
+`doctor` 检查 CLI 和支持的参数，不调用模型，也不验证登录。插件安装应使用宿主提供的实际
+Skill 目录，不要把带版本号的缓存路径固定到个人配置里。
+
+项目角色放在项目 `.agents/`，跨项目个人角色放在 `~/.codex/worker-agents/`，
+**不要放在插件缓存或被安装脚本替换的 Skill 目录中**。例如创建 `auditor.md`：
+
+```markdown
+---
+run-agent: grok
+permission: read-only
+---
+# 审查代理
+只读审查指定代码，不改文件，不再派工。
+仅报告能复现的问题，附文件、行号和验证证据。
+```
+
+`run-agent` 可以改为已安装的 `cursor-agent`、`codex` 等后端。
+`model`、`effort` 可省略，沿用后端默认配置；有效值取决于后端和模型，Cursor/Gemini 不支持 `effort`。
+审查角色请显式写 `read-only`；实现角色用 `safe-edit`（未写权限时的默认值）。
+权限约束取决于后端，不是统一的安全隔离边界。
+
+```sh
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" submit \
+  --agent auditor --cwd "$PWD" --prompt "检查解析器，只报告复现证据，不修改文件"
+# 用 submit 返回的任务编号替换 TASK_ID。
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" status TASK_ID
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" result TASK_ID
+```
+
+默认任务状态和并发配置保存在 `~/.sub-agents/`，升级保留。
+更换状态目录时把 `--state-dir PATH` 放在子命令之前；并发数按状态目录分别保存。
+任务环境快照可能含凭据，请使用受限的本地目录，不要提交到仓库。
+升级前先结束或取消活动任务，再运行 `shutdown`；角色修改只影响之后的提交。
+[完整安装与配置说明](skills/sub-agents/references/install-and-configure.md)。
 
 ### 2. 创建第一个代理
 
@@ -336,9 +450,17 @@ permission: read-only
 |--------|------|------|
 | 1 | `--agents-dir` 参数 | 显式指定的路径 |
 | 2 | 环境变量 | `$SUB_AGENTS_DIR` |
-| 3 | 默认值 | `{cwd}/.agents/` |
+| 3 | 托管任务：项目角色 | `{cwd}/.agents/` |
+| 4 | 托管任务：个人角色 | `~/.codex/worker-agents/` |
+| 5 | 托管任务：内置角色 | 已安装 Skill 的 `defaults/` |
 
-如需自定义：`export SUB_AGENTS_DIR=/custom/path`
+托管 `tasks.py` 按每个角色名称查找。`--agents-dir` 优先于 `SUB_AGENTS_DIR`，
+两者任一生效时**只查指定目录，不回退**；都未设置时按项目 → 个人 → 内置查找。
+高优先级文件格式错误会报错，不会静默使用低优先级角色。
+用 `tasks.py agents --cwd /absolute/project` 查看生效角色和来源目录。
+旧同步入口 `run_subagent.py` 的默认目录仍只有 `{cwd}/.agents/`。
+
+如需独立目录：`export SUB_AGENTS_DIR=/custom/path`，请放在已安装 Skill/插件目录之外。
 
 ### CLI 选择优先级
 

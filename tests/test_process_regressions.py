@@ -173,3 +173,89 @@ def test_unknown_batch_wrapper_fails_explicitly(tmp_path: Path) -> None:
     wrapper.chmod(0o755)
     with pytest.raises(ValueError, match="batch CLI"):
         resolve_command([str(wrapper), "prompt"], None)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX detached sessions and SIGTERM")
+@pytest.mark.parametrize("cancel", [False, True])
+def test_detached_sigterm_ignoring_child_is_force_stopped(tmp_path: Path, *, cancel: bool) -> None:
+    child = (
+        "import time,signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+        'time.sleep(1.5);open("escaped","w").write("bad")'
+    )
+    code = (
+        "import subprocess,sys,time;"
+        f"subprocess.Popen([sys.executable,'-c',{child!r}],start_new_session=True);"
+        "time.sleep(10)"
+    )
+    started = time.monotonic()
+    options = ExecutionOptions(cancelled=lambda: cancel and time.monotonic() - started > 0.4)
+    result = run_code(code, tmp_path, timeout=700, options=options)
+    assert result["exit_code"] == (130 if cancel else 124)
+    time.sleep(1.6)
+    assert not (tmp_path / "escaped").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX new session")
+@pytest.mark.parametrize("owner_crashes", [False, True])
+def test_reparented_child_is_cleaned_after_owner_or_backend_exit(
+    tmp_path: Path, *, owner_crashes: bool
+) -> None:
+    import subprocess
+
+    import _process
+
+    child = 'import time;time.sleep(1.5);open("escaped","w").write("bad")'
+    code = (
+        "import subprocess,sys,time;"
+        f"subprocess.Popen([sys.executable,'-c',{child!r}],start_new_session=True);"
+        + ("time.sleep(10)" if owner_crashes else "time.sleep(.1)")
+    )
+    if owner_crashes:
+        owner = (
+            f"import sys,time,os;sys.path.insert(0,{str(Path(_process.__file__).parent)!r});"
+            "from _process import launch;"
+            f"tree=launch([sys.executable,'-c',{code!r}],{str(tmp_path)!r},None);"
+            "time.sleep(.3);os._exit(0)"
+        )
+        # S603: bounded Python fixture; it never calls a model CLI.
+        process = subprocess.Popen([sys.executable, "-B", "-c", owner])  # noqa: S603
+        process.wait(timeout=5)
+    else:
+        run_code(code, tmp_path, timeout=700)
+    time.sleep(1.6)
+    assert not (tmp_path / "escaped").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process ownership markers")
+def test_task_cleanup_does_not_kill_another_task(tmp_path: Path) -> None:
+    from _process import launch
+
+    peer = launch([sys.executable, "-c", "import time;time.sleep(10)"], str(tmp_path), None)
+    try:
+        run_code("import time;time.sleep(10)", tmp_path, timeout=300)
+        assert peer.process.poll() is None
+    finally:
+        peer.stop(force=True)
+        peer.process.wait(timeout=3)
+        peer.close()
+        for stream in (peer.process.stdin, peer.process.stdout, peer.process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process inspection")
+def test_inspection_failure_still_stops_owned_root(tmp_path: Path) -> None:
+    from _process import launch
+
+    tree = launch([sys.executable, "-c", "import time;time.sleep(10)"], str(tmp_path), None)
+    try:
+        with patch("_posix.snapshot", side_effect=OSError("fixture inspection failure")):
+            with pytest.raises(OSError, match="inspection failure"):
+                tree.stop()
+        tree.process.wait(timeout=3)
+    finally:
+        tree.stop(force=True)
+        tree.close()
+        for stream in (tree.process.stdin, tree.process.stdout, tree.process.stderr):
+            if stream is not None:
+                stream.close()

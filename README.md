@@ -31,7 +31,66 @@ The skill itself follows the [Agent Skills](https://agentskills.io) standard; th
 
 ## Quick Start
 
-**Requirements:** Python 3.9+ and at least one [supported backend](#supported-backends) installed.
+**Requirements:** Python 3.9+, Git on PATH, and at least one [supported backend](#supported-backends) installed.
+
+### Ask an AI assistant to install it
+
+Copy this prompt into an AI coding assistant with terminal and file access.
+The repository URL is already filled in; replace it only to install another fork
+or a local checkout. The prompt covers installation and upgrades across supported hosts. The assistant
+first lists role/backend options for you to choose, then configures them globally.
+During later tasks, it discovers and selects from the configured roles automatically.
+
+```text
+Install and configure Sub-Agents Runner from: https://github.com/lilicocon/sub-agents-skills.
+The goal is cross-project global agents: I choose roles and their execution backends during setup; afterward the AI discovers and selects roles for each task.
+
+First read the target repository's README, SKILL.md, and installation/configuration guide.
+Inspect the OS, host client, Python, Git, available backend CLIs, existing installation, and configuration.
+Use that repository and local CLI help as the source of truth; do not accidentally install upstream or a different fork.
+
+Work in two phases: inspect and let me choose, then install and configure my choices.
+
+Phase 1: Read-only discovery and configuration options; do not choose roles/backends for me.
+- Show a table of repository-supported backends, CLI installation status, and verified or unknown login status.
+  Distinguish supported-but-missing backends from installed ones; do not guess models or authentication.
+- List existing global roles and offer researcher (investigation), implementer (implementation), and reviewer (review).
+  Offer specialist roles such as Java review when relevant, without creating every option. Explain responsibilities and permissions.
+- Show a suggested mapping: role -> backend/run-agent -> model/effort (backend defaults) -> permission.
+  Multiple roles may share a backend, and multiple differently named roles may cover the same responsibility.
+- Ask together which roles I want, which backend each uses, and whether to keep backend model defaults.
+  Give a short answer example: "Grok for research/review, Cursor for implementation, default models, no specialists."
+  Reuse any choices I have already supplied; otherwise wait for my selection. Silence is not a selection.
+
+Phase 2: After my selection, complete the following without asking again about settled choices.
+1. Choose the host's plugin or standalone skill installation, avoiding duplicate installs.
+   Preserve existing settings and roles. Back up and merge existing files rather than replacing entire configurations.
+   Check active tasks before upgrading; do not forcibly stop ongoing work.
+2. Prefer installed backends and existing login/model settings. Do not install every backend or change models by default.
+   Install missing required dependencies and my selected backends using OS-appropriate official instructions.
+   Leave interactive login to me; do not ask me to paste plaintext credentials.
+3. Put cross-project roles in Runner's supported global role directory, normally ~/.codex/worker-agents/,
+   outside the plugin cache, not only in the current project. Create/update only my selected roles and run-agent mappings.
+   Use read-only for investigation/review and safe-edit for implementation; omit model and effort when I choose defaults.
+   Preserve unselected existing roles. Built-in roles may still appear through fallback; distinguish them in the final inventory.
+   Preserve project-role precedence and avoid setting SUB_AGENTS_DIR unnecessarily,
+   since it disables fallback lookup.
+4. Merge automatic delegation guidance into the host's supported global instruction file:
+   when delegation is useful, read the Runner skill, discover roles using tasks.py agents --cwd <absolute project path>,
+   select by responsibility, and dispatch through managed tasks. Prefer my configured global roles, respecting project overrides
+   and explicit task instructions; do not require me to name a role each time. The host owns monitoring, independent verification,
+   and final delivery; workers must not delegate again. Handle simple tasks directly and honor requests not to delegate.
+   Do not hard-code versioned plugin cache paths. If global instructions or automatic discovery are unsupported,
+   explain that limitation and provide a working explicit invocation.
+5. Use the installed code to run doctor, role discovery, and configuration validation. Also verify discovery in a temporary
+   directory with no project roles: global roles must be visible, come from the correct directory, and match my backend choices.
+   Doctor is not a login check. Do not send real model requests by default; list anything requiring a real call separately.
+
+I choose the role/backend mapping; resolve the remaining installation details from the environment where possible.
+Finish with the source/version, actual install path, changed and backed-up files, role/backend mapping,
+validation results and gaps, one usage example, and any restart or new-session requirement.
+Carry out the installation and configuration, not just a plan. Do not commit, push, or modify GitHub.
+```
 
 ### 1. Install the Skill
 
@@ -92,6 +151,28 @@ git clone https://github.com/shinpr/sub-agents-skills.git
 cd sub-agents-skills
 ./install.sh --target <client-skill-path>
 ```
+
+### Installation and configuration
+
+Installing this skill/plugin copies the runner; install and log into the backend
+CLI separately. Built-in `researcher`/`reviewer` use Grok, and `implementer` uses
+Cursor. You can replace those roles or define your own agents in Markdown.
+
+For a local standalone install and checks (choose this **or** the plugin install):
+
+```sh
+bash install.sh --target "$HOME/.codex/skills" --skill sub-agents
+RUNNER_SKILL_DIR="$HOME/.codex/skills/sub-agents"
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" doctor
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" agents --cwd "$PWD"
+python3 "$RUNNER_SKILL_DIR/scripts/tasks.py" configure --max-parallel 2
+```
+
+`doctor` makes no model request and does not verify login. For plugin installs,
+use the actual skill directory supplied by the host. Put project roles in
+`.agents/` or personal roles in `~/.codex/worker-agents/`, **outside the plugin
+cache**, so upgrades retain them. Finish/cancel active tasks and run `shutdown`
+before upgrading. [Full installation and custom-agent guide](skills/sub-agents/references/install-and-configure.md).
 
 ### 2. Create Your First Agent
 
@@ -320,9 +401,19 @@ For more advanced patterns (completion checklists, prohibited actions, structure
 |----------|--------|------|
 | 1 | `--agents-dir` argument | Explicit path |
 | 2 | Environment variable | `$SUB_AGENTS_DIR` |
-| 3 | Default | `{cwd}/.agents/` |
+| 3 | Managed project role | `{cwd}/.agents/` |
+| 4 | Managed personal role | `~/.codex/worker-agents/` |
+| 5 | Managed built-in role | Installed skill's `defaults/` |
 
-To customize: `export SUB_AGENTS_DIR=/custom/path`
+For managed `tasks.py`, lookup is per role. `--agents-dir` overrides
+`SUB_AGENTS_DIR`; either selects only that directory, with no fallback. Without
+both overrides, project → personal → built-in applies. Invalid higher-priority
+files fail rather than falling back. `tasks.py agents --cwd /absolute/project`
+shows effective definitions. The legacy synchronous `run_subagent.py` defaults
+only to `{cwd}/.agents/`.
+
+To select a dedicated directory: `export SUB_AGENTS_DIR=/custom/path`. Keep it
+outside installed skill/plugin directories.
 
 ### CLI Selection Priority
 

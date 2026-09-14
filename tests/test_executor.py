@@ -1009,3 +1009,90 @@ class TestMainEndToEnd:
             assert {"researcher", "implementer", "reviewer"}.issubset(
                 {item["name"] for item in payload["agents"]}
             )
+
+
+@pytest.mark.parametrize("hang", [False, True])
+def test_mixed_pretty_result_real_backend(tmp_path: Path, *, hang: bool) -> None:
+    source = (
+        "import json,time\n"
+        "print(json.dumps({'type':'system','session_id':'mixed'}),flush=True)\n"
+        "print(json.dumps({'type':'result','result':'complete'},indent=2),flush=True)\n"
+        + ("time.sleep(30)\n" if hang else "")
+    )
+    with patch(
+        "_executor.build_invocation_args",
+        return_value=ProcessInvocation(sys.executable, ["-c", source]),
+    ):
+        result = execute_agent(AgentInvocation("cursor-agent", "x", str(tmp_path)), 4000)
+    assert result["status"] == "success"
+    assert result["result"] == "complete"
+    assert result["metadata"]["session_id"] == "mixed"
+
+
+@pytest.mark.parametrize(
+    ("cli", "key", "child_key"),
+    [
+        ("cursor-agent", "CURSOR_API_KEY", "CURSOR_API_KEY"),
+        ("glm", "GLM_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+        ("kimi", "KIMI_API_KEY", "ANTHROPIC_API_KEY"),
+    ],
+)
+def test_submit_credentials_reach_real_backend(
+    tmp_path: Path, cli: str, key: str, child_key: str
+) -> None:
+    from _executor import ExecutionOptions
+    from _process import ProcessTree, launch
+
+    def launch_stub(command: list[str], cwd: str, env: dict[str, str] | None) -> ProcessTree:
+        source = (
+            "import json,os;print(json.dumps({'type':'result','result':"
+            f"os.environ.get({child_key!r},'missing')" + "}))"
+        )
+        return launch([sys.executable, "-c", source], cwd, env)
+
+    snapshot = {**os.environ, key: "submit"}
+    with patch.dict(os.environ, {key: "supervisor"}):
+        with patch("_executor.launch", side_effect=launch_stub):
+            result = execute_agent(
+                AgentInvocation(cli, "x", str(tmp_path)),
+                4000,
+                ExecutionOptions(environment=snapshot),
+            )
+    assert result["status"] == "success"
+    assert result["result"] == "submit"
+
+
+def test_opencode_auth_uses_submit_home(tmp_path: Path) -> None:
+    from _executor import _isolated_opencode_env
+
+    auth = tmp_path / "submit" / ".local" / "share" / "opencode" / "auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text('{"source":"submit"}')
+    with patch.dict(os.environ, {"XDG_DATA_HOME": str(tmp_path / "supervisor")}):
+        env = _isolated_opencode_env(
+            None, str(tmp_path / "isolated"), {"HOME": str(tmp_path / "submit")}
+        )
+    assert env["XDG_DATA_HOME"] is not None
+    assert (Path(env["XDG_DATA_HOME"]) / "opencode" / "auth.json").read_text() == auth.read_text()
+
+
+def test_auth_guidance_uses_submit_snapshot() -> None:
+    result = build_final_response(
+        cli="cursor-agent",
+        returncode=1,
+        result=None,
+        stdout_lines=[],
+        stderr="authentication required",
+        environment={"CLI_API_KEY": "legacy"},
+    )
+    assert "CLI_API_KEY is set" in result["error"]
+    with patch.dict(os.environ, {"CLI_API_KEY": "legacy"}):
+        result = build_final_response(
+            cli="cursor-agent",
+            returncode=1,
+            result=None,
+            stdout_lines=[],
+            stderr="authentication required",
+            environment={},
+        )
+    assert "CLI_API_KEY" not in result["error"]

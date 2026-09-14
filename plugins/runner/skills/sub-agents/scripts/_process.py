@@ -2,55 +2,25 @@
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
-
-def _posix_descendants(root_pid: int) -> list[int]:
-    try:
-        listing = subprocess.run(
-            ["ps", "-axo", "pid=,ppid="],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        ).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    children: dict[int, list[int]] = {}
-    for line in listing.splitlines():
-        parts = line.split()
-        if len(parts) != 2:
-            continue
-        try:
-            pid, ppid = int(parts[0]), int(parts[1])
-        except ValueError:
-            continue
-        children.setdefault(ppid, []).append(pid)
-    found: list[int] = []
-    seen = {root_pid}
-    stack = list(children.get(root_pid, []))
-    while stack:
-        pid = stack.pop()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        found.append(pid)
-        stack.extend(children.get(pid, []))
-    return found
+from _posix import OWNER_ENV, PosixOwner
 
 
 class ProcessTree:
-    def __init__(self, process: subprocess.Popen[str], job: int | None = None) -> None:
+    def __init__(
+        self, process: subprocess.Popen[str], job: int | None = None, *, token: str = ""
+    ) -> None:
         self.process = process
         self.job = job
+        self.owner = PosixOwner(process.pid, token)
 
     def stop(self, *, force: bool = False) -> None:
         if sys.platform == "win32":
@@ -60,13 +30,7 @@ class ProcessTree:
                 if not kernel.TerminateJobObject(self.job, 1):
                     raise ctypes.WinError(ctypes.get_last_error())
         else:
-            descendants = _posix_descendants(self.process.pid)
-            sig = signal.SIGKILL if force else signal.SIGTERM
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(self.process.pid, sig)
-            for pid in descendants:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, sig)
+            self.owner.stop(force=force, include_root=self.process.poll() is None)
 
     def close(self) -> None:
         if sys.platform == "win32" and self.job is not None:
@@ -145,7 +109,9 @@ def _windows_job(process: subprocess.Popen[str]) -> int:
 
 
 def resolve_command(command: list[str], env: dict[str, str] | None) -> list[str]:
-    executable = shutil.which(command[0], path=(env or os.environ).get("PATH"))
+    executable = shutil.which(
+        command[0], path=(os.environ if env is None else env).get("PATH", os.defpath)
+    )
     if executable is None:
         raise FileNotFoundError(command[0])
     path = Path(executable)
@@ -162,7 +128,9 @@ def resolve_command(command: list[str], env: dict[str, str] | None) -> list[str]
         binary = (
             str(node)
             if node.is_file()
-            else shutil.which("node", path=(env or os.environ).get("PATH"))
+            else shutil.which(
+                "node", path=(os.environ if env is None else env).get("PATH", os.defpath)
+            )
         )
         if binary and entry.is_file():
             return [binary, str(entry), *command[1:]]
@@ -184,11 +152,15 @@ def launch(command: list[str], cwd: str, env: dict[str, str] | None) -> ProcessT
         str(Path(__file__).with_name("_process_bootstrap.py")),
         *resolve_command(command, env),
     ]
+    token = uuid.uuid4().hex
+    child_env = dict(os.environ if env is None else env)
+    if sys.platform != "win32":
+        child_env[OWNER_ENV] = token
     # S603: argv is constructed by the closed backend registry; shell is disabled.
     process = subprocess.Popen(  # noqa: S603
         actual,
         cwd=cwd,
-        env=env,
+        env=child_env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -198,7 +170,7 @@ def launch(command: list[str], cwd: str, env: dict[str, str] | None) -> ProcessT
         bufsize=1,
         start_new_session=sys.platform != "win32",
     )
-    tree = ProcessTree(process)
+    tree = ProcessTree(process, token=token)
     try:
         if sys.platform == "win32":
             tree.job = _windows_job(process)

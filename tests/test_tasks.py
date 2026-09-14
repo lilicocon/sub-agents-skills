@@ -309,3 +309,107 @@ def test_exported_patch_preserves_trailing_whitespace(tmp_path: Path) -> None:
     git(project, "apply", str(result["patch"]))
     assert (project / "hello.py").read_text() == "answer = 2  \n"
     git(project, "worktree", "remove", "--force", str(worktree))
+
+
+def test_missing_git_never_enqueues_source_writer(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from _workspace import snapshot
+
+    project = repo(tmp_path / "project")
+    monkeypatch.setenv("PATH", str(tmp_path / "no-executables"))
+    with pytest.raises(ValueError, match="Git is required"):
+        snapshot(project, write=True)
+    with pytest.raises(ValueError, match="Git is required"):
+        enqueue(store, project, "--agent", "implementer")
+    assert store.all() == []
+    assert (project / "hello.py").read_text() == "answer = 1\n"
+
+
+def test_tick_never_deserializes_history_or_completed_dependency(
+    store: Store, tmp_path: Path
+) -> None:
+    dependency = enqueue(store, tmp_path / "dependency")
+    store.finish(dependency, "completed", response={"result": "historic-payload" * 20000})
+    for i in range(150):
+        store.add(
+            {"id": f"old-{i}", "state": "completed", "created": i, "response": "historic-payload"}
+        )
+    task_id = enqueue(store, tmp_path / "next", "--depends-on", dependency)
+    original = json.loads
+
+    def only_active(value: str) -> object:
+        assert "historic-payload" not in value
+        return original(value)
+
+    with patch("_state.json.loads", side_effect=only_active):
+        with patch("_scheduler.detach") as spawn:
+            assert tick(store)
+    spawn.assert_called_once_with(store.root, "_work", task_id)
+    store.finish(task_id, "completed")
+    with patch("_state.json.loads", side_effect=AssertionError("idle tick read a result")):
+        assert not tick(store)
+
+
+def test_cleanup_checks_holders_across_state_directories(store: Store, tmp_path: Path) -> None:
+    project = repo(tmp_path / "project")
+    writer = enqueue(store, project, "--agent", "implementer")
+    worktree = store.root / writer / "worktree"
+    git(project, "worktree", "add", "-b", f"runner/{writer}", str(worktree), "HEAD")
+    store.finish(writer, "completed")
+    other = Store(tmp_path / "other-state")
+    reader = enqueue(other, worktree, "--agent", "researcher")
+    with pytest.raises(ValueError, match=f"still in use by task {reader}"):
+        cleanup(store, parser().parse_args(["cleanup", writer]))
+    assert worktree.is_dir()
+    # Completed readers also retain access to their artifacts until cleaned.
+    other.finish(reader, "completed")
+    with pytest.raises(ValueError, match="still in use"):
+        cleanup(store, parser().parse_args(["cleanup", writer]))
+    cleanup(other, parser().parse_args(["cleanup", reader]))
+    assert cleanup(store, parser().parse_args(["cleanup", writer]))["cleaned"]
+    assert not worktree.exists()
+
+
+def test_cleanup_and_submit_share_lifecycle_lock(store: Store, tmp_path: Path) -> None:
+    from concurrent.futures import Future, ThreadPoolExecutor
+    from contextlib import ExitStack
+    from threading import Event, current_thread, main_thread
+
+    project = repo(tmp_path / "project")
+    writer = enqueue(store, project, "--agent", "implementer")
+    worktree = store.root / writer / "worktree"
+    git(project, "worktree", "add", "-b", f"runner/{writer}", str(worktree), "HEAD")
+    store.finish(writer, "completed")
+    other = Store(tmp_path / "other-state")
+    args = parser().parse_args(
+        ["submit", "--agent", "researcher", "--cwd", str(worktree), "--prompt", "review"]
+    )
+    attempted = Event()
+    real_acquire = FileLock.acquire
+    submissions: list[Future[dict[str, object]]] = []
+
+    def acquire(lock: FileLock) -> bool:
+        if current_thread() is not main_thread() and lock.path.name == "runner-workspace.lock":
+            attempted.set()
+        return real_acquire(lock)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+
+        def remove_with_concurrent_submit(cwd: Path, *args: str) -> str:
+            if args[:2] == ("worktree", "remove"):
+                submissions.append(executor.submit(submit, other, submit_args))
+                assert attempted.wait(5), "submission did not reach lifecycle lock"
+                assert not submissions[0].done(), "submission bypassed cleanup lock"
+            return git(cwd, *args)
+
+        submit_args = args
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(FileLock, "acquire", acquire))
+            stack.enter_context(patch("tasks.git", side_effect=remove_with_concurrent_submit))
+            stack.enter_context(patch("tasks.ensure_supervisor"))
+            cleanup(store, parser().parse_args(["cleanup", writer]))
+            with pytest.raises(ValueError, match="cwd must be an existing directory"):
+                submissions[0].result(timeout=5)
+    assert not worktree.exists()
+    assert other.all() == []

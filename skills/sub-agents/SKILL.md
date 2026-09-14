@@ -12,6 +12,10 @@ Existing synchronous calls through `scripts/run_subagent.py` remain supported.
 
 ## Start
 
+For installation, upgrades, backend login and custom roles, read
+[install-and-configure.md](references/install-and-configure.md). Keep personal
+role definitions outside the installed skill directory so upgrades retain them.
+
 Run `python {SKILL_DIR}/scripts/tasks.py doctor` to check Cursor/Grok installations
 and supported flags without sending a model request. This does not verify login.
 List roles with `tasks.py agents --cwd <absolute-project-directory>`.

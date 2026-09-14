@@ -88,6 +88,9 @@ class Store:
                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
             db.execute("INSERT OR IGNORE INTO settings VALUES ('max_parallel', '2')")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS tasks_state_created ON tasks(state, created, id)"
+            )
             db.execute("PRAGMA user_version=1")
 
     @contextmanager
@@ -118,6 +121,34 @@ class Store:
         with self.connect() as db:
             rows = db.execute("SELECT data FROM tasks ORDER BY created, id").fetchall()
         return [cast(dict[str, object], json.loads(row[0])) for row in rows]
+
+    def active(self) -> list[dict[str, object]]:
+        """Fetch runnable metadata without reading historic result bodies."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT data FROM tasks WHERE state IN ('queued', 'running') ORDER BY created, id"
+            ).fetchall()
+        return [cast(dict[str, object], json.loads(row[0])) for row in rows]
+
+    def dependency_states(self, task_ids: list[str]) -> dict[str, str]:
+        # Read the indexed state column only, including for completed dependencies.
+        with self.connect() as db:
+            result: dict[str, str] = {}
+            for task_id in set(task_ids):
+                row = db.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+                if row is None:
+                    raise ValueError(f"Unknown task: {task_id}")
+                result[task_id] = str(row[0])
+        return result
+
+    def has_active(self) -> bool:
+        with self.connect() as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM tasks WHERE state IN ('queued', 'running') LIMIT 1"
+                ).fetchone()
+                is not None
+            )
 
     def update(self, task_id: str, **changes: object) -> dict[str, object]:
         with self.connect() as db:

@@ -67,7 +67,7 @@ def _conflicts(task: dict[str, object], running: list[dict[str, object]]) -> boo
 def tick(store: Store) -> bool:
     _CHILDREN[:] = [child for child in _CHILDREN if child.poll() is None]
     now = time.time()
-    tasks = store.all()
+    tasks = store.active()
     for task in tasks:
         task_id = str(task["id"])
         if (
@@ -80,8 +80,11 @@ def tick(store: Store) -> bool:
                 "interrupted",
                 error="Worker exited without recording an outcome; inspect artifacts before retrying",
             )
-    tasks = store.all()
-    by_id = {str(task["id"]): task for task in tasks}
+    tasks = store.active()
+    dependency_states = store.dependency_states(
+        [dep for task in tasks for dep in cast(list[str], task.get("dependencies", []))]
+    )
+    parallelism = store.parallelism()
     running = [task for task in tasks if task["state"] == "running"]
     for task in tasks:
         if task["state"] != "queued":
@@ -90,16 +93,15 @@ def tick(store: Store) -> bool:
         if task.get("cancel_requested"):
             store.finish(task_id, "cancelled")
             continue
-        deps = [by_id[dep] for dep in cast(list[str], task["dependencies"])]
+        deps = [dependency_states[dep] for dep in cast(list[str], task["dependencies"])]
         if any(
-            dep["state"] in {"failed", "cancelled", "interrupted", "blocked", "timed_out"}
-            for dep in deps
+            dep in {"failed", "cancelled", "interrupted", "blocked", "timed_out"} for dep in deps
         ):
             store.finish(task_id, "blocked", error="A dependency did not complete")
             continue
-        if any(dep["state"] != "completed" for dep in deps):
+        if any(dep != "completed" for dep in deps):
             continue
-        if len(running) >= store.parallelism() or _conflicts(task, running):
+        if len(running) >= parallelism or _conflicts(task, running):
             continue
         task = store.update(task_id, state="running", started=time.time())
         try:
@@ -107,7 +109,7 @@ def tick(store: Store) -> bool:
             running.append(task)
         except OSError as exc:
             store.finish(task_id, "failed", error=str(exc))
-    return any(task["state"] in {"queued", "running"} for task in store.all())
+    return store.has_active()
 
 
 def supervise(root: Path) -> None:

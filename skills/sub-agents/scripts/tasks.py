@@ -20,7 +20,7 @@ from _builder import AgentInvocation, build_invocation_args
 from _loader import discover_agents, resolve_agent
 from _scheduler import ensure_supervisor, supervise, work
 from _state import TERMINAL, FileLock, Store, state_root
-from _workspace import git, overlaps, snapshot
+from _workspace import git, lifecycle_lock, overlaps, register_store, registered_stores, snapshot
 
 
 def doctor() -> dict[str, object]:
@@ -99,31 +99,35 @@ def submit(store: Store, args: argparse.Namespace) -> dict[str, object]:
             effort=agent.effort,
         )
     )
-    task_id = uuid.uuid4().hex
-    task: dict[str, object] = {
-        **asdict(agent),
-        **snapshot(cwd, write=agent.permission != "read-only"),
-        "id": task_id,
-        "state": "queued",
-        "created": time.time(),
-        "cwd": str(cwd),
-        "cli": backend,
-        "prompt": prompt,
-        "role": args.agent,
-        "timeout_ms": args.timeout,
-        "dependencies": args.depends_on,
-        "retry_of": args.retry_of,
-        "expected_files": args.expect,
-        "cancel_requested": False,
-        "acceptance": "pending",
-        "branch": "runner/" + task_id if agent.permission != "read-only" else None,
-        "environment": dict(os.environ),
-    }
-    (store.root / task_id).mkdir(mode=0o700)
-    (store.root / task_id / "request.json").write_text(
-        json.dumps(task, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    store.add(task)
+    with lifecycle_lock(cwd, store.root) as directory:
+        if not cwd.is_dir():
+            raise ValueError("cwd must be an existing directory")
+        register_store(directory, store.root)
+        task_id = uuid.uuid4().hex
+        task: dict[str, object] = {
+            **asdict(agent),
+            **snapshot(cwd, write=agent.permission != "read-only"),
+            "id": task_id,
+            "state": "queued",
+            "created": time.time(),
+            "cwd": str(cwd),
+            "cli": backend,
+            "prompt": prompt,
+            "role": args.agent,
+            "timeout_ms": args.timeout,
+            "dependencies": args.depends_on,
+            "retry_of": args.retry_of,
+            "expected_files": args.expect,
+            "cancel_requested": False,
+            "acceptance": "pending",
+            "branch": "runner/" + task_id if agent.permission != "read-only" else None,
+            "environment": dict(os.environ),
+        }
+        (store.root / task_id).mkdir(mode=0o700)
+        (store.root / task_id / "request.json").write_text(
+            json.dumps(task, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        store.add(task)
     ensure_supervisor(store.root)
     return {"id": task_id, "state": "queued", "state_dir": str(store.root)}
 
@@ -186,6 +190,24 @@ def worktree_holder(store: Store, task_id: str, worktree: Path) -> str | None:
     return None
 
 
+def cleanup_worktree(store: Store, task: dict[str, object], worktree: Path) -> None:
+    with lifecycle_lock(worktree, store.root) as lock_directory:
+        for state_directory in registered_stores(lock_directory, store.root):
+            if not (state_directory / "tasks.sqlite3").is_file():
+                continue
+            holder = worktree_holder(Store(state_directory), str(task["id"]), worktree)
+            if holder:
+                raise ValueError(f"Worktree is still in use by task {holder}; retaining it")
+        root = Path(str(task["repository"]))
+        if git(worktree, "status", "--porcelain"):
+            raise ValueError("Worktree has uncommitted results; integrate them before cleanup")
+        merged = git(root, "branch", "--merged", "HEAD", "--list", str(task["branch"]))
+        if not merged:
+            raise ValueError("Task branch is not merged into source HEAD; retaining worktree")
+        git(root, "worktree", "remove", str(worktree))
+        git(root, "branch", "-d", str(task["branch"]))
+
+
 def cleanup(store: Store, args: argparse.Namespace) -> dict[str, object]:
     task = store.get(args.id)
     if task["state"] not in TERMINAL:
@@ -198,17 +220,7 @@ def cleanup(store: Store, args: argparse.Namespace) -> dict[str, object]:
         worktree = directory / "worktree"
         # Never force-remove dirty/unmerged results. Codex integrates first.
         if worktree.exists():
-            holder = worktree_holder(store, args.id, worktree)
-            if holder:
-                raise ValueError(f"Worktree is still in use by task {holder}; retaining it")
-            root = Path(str(task["repository"]))
-            if git(worktree, "status", "--porcelain"):
-                raise ValueError("Worktree has uncommitted results; integrate them before cleanup")
-            merged = git(root, "branch", "--merged", "HEAD", "--list", str(task["branch"]))
-            if not merged:
-                raise ValueError("Task branch is not merged into source HEAD; retaining worktree")
-            git(root, "worktree", "remove", str(worktree))
-            git(root, "branch", "-d", str(task["branch"]))
+            cleanup_worktree(store, task, worktree)
         for name in ("stdout.log", "stderr.log", "changes.patch"):
             (directory / name).unlink(missing_ok=True)
         store.update(args.id, cleaned=True)
