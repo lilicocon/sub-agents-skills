@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 from _builder import AgentInvocation
+from _constants import DEFAULT_TIMEOUT_MS, parse_timeout_ms
 from _executor import AgentResponse, ExecutionOptions
 from _loader import resolve_agent
 from _scheduler import tick, work
@@ -413,3 +414,62 @@ def test_cleanup_and_submit_share_lifecycle_lock(store: Store, tmp_path: Path) -
                 submissions[0].result(timeout=5)
     assert not worktree.exists()
     assert other.all() == []
+
+
+def timeout_argv(cwd: Path, *extra: str) -> list[str]:
+    return [
+        "submit",
+        "--agent",
+        "researcher",
+        "--cwd",
+        str(cwd),
+        "--prompt",
+        "Return evidence",
+        *extra,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("600000", 600000),
+        ("900000", 900000),
+        ("600s", 600000),
+        ("10m", 600000),
+        ("1000ms", 1000),
+        (" 600S ", 600000),
+    ],
+)
+def test_parse_timeout_accepts_milliseconds_and_units(text: str, expected: int) -> None:
+    assert parse_timeout_ms(text) == expected
+
+
+@pytest.mark.parametrize("text", ["600", "30", "1", "999"])
+def test_parse_timeout_rejects_seconds_typed_as_milliseconds(text: str) -> None:
+    """A bare value under a second expired instantly and looked like a backend failure.
+
+    Regression for real runs submitted with ``--timeout 600``: the task died after
+    0.6 s and was recorded as ``timed_out`` with no hint that the unit was wrong.
+    """
+    with pytest.raises(ValueError, match="milliseconds"):
+        parse_timeout_ms(text)
+
+
+@pytest.mark.parametrize("text", ["0", "-1", "abc", "", "1.5s"])
+def test_parse_timeout_rejects_unusable_values(text: str) -> None:
+    with pytest.raises(ValueError, match="timeout"):
+        parse_timeout_ms(text)
+
+
+def test_submit_rejects_subsecond_timeout_with_actionable_message(tmp_path: Path) -> None:
+    cwd = tmp_path / "repo"
+    cwd.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ValueError, match="600s"):
+        parser().parse_args(timeout_argv(cwd, "--timeout", "600"))
+
+
+def test_submit_timeout_defaults_and_units(tmp_path: Path) -> None:
+    cwd = tmp_path / "repo"
+    cwd.mkdir(parents=True, exist_ok=True)
+    assert parser().parse_args(timeout_argv(cwd)).timeout == DEFAULT_TIMEOUT_MS
+    assert parser().parse_args(timeout_argv(cwd, "--timeout", "15m")).timeout == 900000

@@ -327,7 +327,7 @@ Benutzerdefinierter Pfad: `export SUB_AGENTS_DIR=/custom/path`
 | `--agent` | Ja* | Name einer Agentendefinition aus `--list` |
 | `--prompt` | Ja* | Beschreibung der zu delegierenden Aufgabe |
 | `--cwd` | Ja* | Arbeitsverzeichnis als absoluter Pfad |
-| `--timeout` | Nein | Zeitlimit in Millisekunden, Standard: 600000 |
+| `--timeout` | Nein | Zeitlimit in Millisekunden oder mit Einheit wie `600s` / `10m`, Standard: 600000 |
 | `--cli` | Nein | CLI erzwingen: `codex`, `claude`, `cursor-agent`, `glm`, `kimi`, `grok`, `antigravity`, `gemini`, `opencode`, `command-code` |
 
 \* Erforderlich, wenn `--list` nicht verwendet wird.

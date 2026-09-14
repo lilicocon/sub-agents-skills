@@ -483,7 +483,7 @@ permission: read-only
 | `--agent` | 是* | 从 `--list` 的结果中选择代理定义名称 |
 | `--prompt` | 是* | 要委派的任务说明 |
 | `--cwd` | 是* | 工作目录（必须是绝对路径） |
-| `--timeout` | 否 | 超时时间，单位为毫秒（默认：600000） |
+| `--timeout` | 否 | 超时时间，单位为毫秒，也接受 `600s` / `10m` 这类带单位的写法（默认：600000） |
 | `--cli` | 否 | 强制指定 CLI：`codex`、`claude`、`cursor-agent`、`glm`、`kimi`、`grok`、`antigravity`、`gemini`、`opencode`、`command-code` |
 
 \* 不使用 `--list` 时必填

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import NoReturn, cast
 
 from _builder import AgentInvocation, build_invocation_args
+from _constants import DEFAULT_TIMEOUT_MS, parse_timeout_ms
 from _loader import discover_agents, resolve_agent
 from _scheduler import ensure_supervisor, supervise, work
 from _state import TERMINAL, FileLock, Store, state_root
@@ -234,6 +235,14 @@ class JsonArgumentParser(argparse.ArgumentParser):
         raise ValueError(message)
 
 
+def _timeout_argument(value: str) -> int:
+    """Adapt the shared parser so argparse reports the actual reason."""
+    try:
+        return parse_timeout_ms(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def parser() -> argparse.ArgumentParser:
     p = JsonArgumentParser(description=__doc__)
     p.add_argument("--state-dir", help="Local state directory (default ~/.sub-agents)")
@@ -250,7 +259,12 @@ def parser() -> argparse.ArgumentParser:
     prompts = add.add_mutually_exclusive_group(required=True)
     prompts.add_argument("--prompt")
     prompts.add_argument("--prompt-file")
-    add.add_argument("--timeout", type=int, default=600000)
+    add.add_argument(
+        "--timeout",
+        type=_timeout_argument,
+        default=DEFAULT_TIMEOUT_MS,
+        help=f"Milliseconds, or a united value like 600s/10m (default: {DEFAULT_TIMEOUT_MS})",
+    )
     add.add_argument("--depends-on", action="append", default=[])
     add.add_argument("--expect", action="append", default=[])
     add.add_argument("--retry-of")

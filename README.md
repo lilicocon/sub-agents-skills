@@ -436,7 +436,7 @@ outside installed skill/plugin directories.
 | `--agent` | Yes* | Agent definition name from --list |
 | `--prompt` | Yes* | Task description to delegate |
 | `--cwd` | Yes* | Working directory (absolute path) |
-| `--timeout` | No | Timeout ms (default: 600000) |
+| `--timeout` | No | Timeout in ms, or a united value such as `600s` / `10m` (default: 600000) |
 | `--cli` | No | Force CLI: `codex`, `claude`, `cursor-agent`, `glm`, `kimi`, `grok`, `antigravity`, `gemini`, `opencode`, `command-code` |
 
 *Required when not using --list

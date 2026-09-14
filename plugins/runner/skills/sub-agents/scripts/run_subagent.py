@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _builder import AgentInvocation
-from _constants import DEFAULT_TIMEOUT_MS, SUPPORTED_CLIS_HELP
+from _constants import DEFAULT_TIMEOUT_MS, SUPPORTED_CLIS_HELP, parse_timeout_ms
 from _executor import execute_agent
 from _loader import discover_agents, get_agents_dir, resolve_agent
 
@@ -23,6 +23,14 @@ def _print_error(error: str, exit_code: int = 1, cli: str | None = None) -> None
     print(json.dumps(payload))
 
 
+def _timeout_argument(value: str) -> int:
+    """Adapt the shared parser so argparse reports the actual reason."""
+    try:
+        return parse_timeout_ms(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Execute external CLI AIs as sub-agents")
     parser.add_argument("--list", action="store_true", help="List available agents")
@@ -32,9 +40,9 @@ def main() -> None:
     parser.add_argument("--agents-dir", help="Directory containing agent definitions")
     parser.add_argument(
         "--timeout",
-        type=int,
+        type=_timeout_argument,
         default=DEFAULT_TIMEOUT_MS,
-        help=f"Timeout in ms (default: {DEFAULT_TIMEOUT_MS})",
+        help=f"Milliseconds, or a united value like 600s/10m (default: {DEFAULT_TIMEOUT_MS})",
     )
     parser.add_argument("--cli", help=f"Force specific CLI ({SUPPORTED_CLIS_HELP})")
 

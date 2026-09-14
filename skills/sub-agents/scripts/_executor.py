@@ -83,16 +83,37 @@ def _cursor_legacy_key_guidance(
     )
 
 
-def _partial_response(
-    cli: str, result: StreamData | None, exit_code: int, error: str
+def _timeout_error(error: str, stdout_chars: int) -> str:
+    """Say whether a timed-out backend was producing anything when it was killed."""
+    if stdout_chars:
+        return f"{error} after emitting {stdout_chars} characters"
+    return (
+        f"{error} without emitting any output. Backends invoked with a non-streaming "
+        "output format buffer the whole reply until the run ends, so nothing survives "
+        "the deadline and a longer timeout alone rarely helps. Narrow the task, or "
+        "supply the files the worker would otherwise search for in the prompt itself."
+    )
+
+
+# PLR0913: the diagnostic count is a distinct input; keyword-only after the error.
+def _partial_response(  # noqa: PLR0913
+    cli: str,
+    result: StreamData | None,
+    exit_code: int,
+    error: str,
+    *,
+    stdout_chars: int | None = None,
 ) -> AgentResponse:
-    return {
+    response: AgentResponse = {
         "result": _result_value(result),
         "exit_code": exit_code,
         "status": "partial" if result else "error",
         "cli": cli,
         "error": error,
     }
+    if stdout_chars is not None:
+        response["metadata"] = {"stdout_chars": stdout_chars}
+    return response
 
 
 def _error_response(
@@ -245,6 +266,7 @@ def _drive_process(
     stderr = ""
     pending = ""
     count = 0
+    stdout_chars = 0
     eof: set[str] = set()
     deadline = time.monotonic() + timeout_ms / 1000
     terminal_at: float | None = None
@@ -290,6 +312,7 @@ def _drive_process(
                 stderr = (stderr + chunk)[-65536:]
                 continue
             chunks.append(chunk)
+            stdout_chars += len(chunk)
             pending += chunk
             if len(pending) > _MAX_LINE_CHARS:
                 failure = (1, "Sub-agent output line exceeded maximum length")
@@ -316,7 +339,11 @@ def _drive_process(
                     environment=options.environment,
                 )
             code, error = failure
-            return _partial_response(cli, processor.get_result(), code, error)
+            if code == 124:
+                error = _timeout_error(error, stdout_chars)
+            return _partial_response(
+                cli, processor.get_result(), code, error, stdout_chars=stdout_chars
+            )
         return build_final_response(
             cli=cli,
             returncode=process.poll(),

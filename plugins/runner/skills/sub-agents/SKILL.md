@@ -31,6 +31,16 @@ Write a self-contained task prompt to a file: goal, necessary context, exact
 working directory, allowed edits, acceptance criteria, and required evidence.
 Workers do not inherit this conversation. Do not put secrets in prompts.
 
+Self-contained means the prompt carries the material. A worker that must first
+locate the relevant files spends its budget searching and is killed at the
+deadline having produced nothing, so supply the sources inline (numbered
+excerpts of tens of KB are fine), say explicitly which tools or builds it should
+not run, and keep one task to one narrow area. Give review tasks a fixed output
+template; without one, backends return progress narration instead of findings.
+
+`--timeout` is milliseconds. It also accepts a united value such as `600s` or
+`10m`; a value under one second is rejected rather than expiring on arrival.
+
 ```bash
 python {SKILL_DIR}/scripts/tasks.py submit --agent implementer \
   --cwd /absolute/project --prompt-file /absolute/task.txt --expect src/result.py
@@ -60,6 +70,12 @@ using dependencies, cancelling, or integrating results.
 mean the user's task is complete. Inspect `output_check`, the final report,
 actual files/diff, source citations, and relevant test results. Progress-only
 responses require a corrective follow-up, even if `has_body` is true.
+
+A timed-out task reporting `stdout_chars: 0` produced nothing at all: backends
+using a non-streaming output format buffer the whole reply and lose it at the
+deadline. Raising the timeout alone rarely changes that outcome; narrow the
+scope or inline the sources instead. A nonzero count means the reply was
+genuinely cut off, which a longer deadline can fix.
 
 Use `accept ID --verdict accepted|rejected --note "verification evidence"` to
 record the host's decision. Default acceptance is pending. Missing expected

@@ -488,6 +488,84 @@ class TestExecuteAgent:
         assert result["exit_code"] == 124
         assert "timed out after 300 ms" in result["error"]
 
+    def test_silent_timeout_reports_that_nothing_was_produced(self) -> None:
+        """A timeout with zero output must say so, not return a bare empty result.
+
+        Backends invoked with a non-streaming output format buffer the whole reply,
+        so killing them at the deadline leaves ``result`` empty. Real runs recorded
+        eleven such timeouts whose only signal was ``has_body=false``, which reads
+        the same as a parsing failure. The response must distinguish the two.
+        """
+        mock_process = MagicMock()
+        kill_event = threading.Event()
+
+        def blocking_readline(size: int = -1) -> str:
+            kill_event.wait(timeout=5)
+            return ""
+
+        mock_process.stdout.readline.side_effect = blocking_readline
+        mock_process.stderr.readline.return_value = ""
+
+        def stop_process() -> None:
+            kill_event.set()
+            mock_process.returncode = -9
+
+        mock_process.kill.side_effect = stop_process
+        mock_process.terminate.side_effect = stop_process
+        mock_process.communicate.return_value = ("", "")
+        mock_process.returncode = None
+
+        with patch("subprocess.Popen", return_value=mock_process):
+            result = execute_agent(
+                AgentInvocation(cli="grok", prompt="x", cwd="/tmp"),
+                timeout_ms=300,
+            )
+
+        assert result["exit_code"] == 124
+        assert "without emitting any output" in result["error"]
+        assert result["metadata"] == {"stdout_chars": 0}
+
+    def test_truncated_timeout_reports_how_much_arrived(self) -> None:
+        """A backend cut off mid-stream is a different failure from a silent one."""
+        mock_process = MagicMock()
+        kill_event = threading.Event()
+        # No "text" key: grok treats the first line carrying one as terminal.
+        lines = iter(['{"type":"thinking","delta":"still working"}\n'])
+
+        def readline(size: int = -1) -> str:
+            try:
+                return next(lines)
+            except StopIteration:
+                kill_event.wait(timeout=5)
+                return ""
+
+        mock_process.stdout.readline.side_effect = readline
+        mock_process.stderr.readline.return_value = ""
+
+        def stop_process() -> None:
+            kill_event.set()
+            mock_process.returncode = -9
+
+        mock_process.kill.side_effect = stop_process
+        mock_process.terminate.side_effect = stop_process
+        mock_process.communicate.return_value = ("", "")
+        mock_process.returncode = None
+
+        with patch("subprocess.Popen", return_value=mock_process):
+            result = execute_agent(
+                AgentInvocation(cli="grok", prompt="x", cwd="/tmp"),
+                timeout_ms=400,
+            )
+
+        assert result["exit_code"] == 124
+        assert "after emitting" in result["error"]
+        assert "without emitting any output" not in result["error"]
+        metadata = result["metadata"]
+        assert isinstance(metadata, dict)
+        emitted = metadata["stdout_chars"]
+        assert isinstance(emitted, int)
+        assert emitted > 0
+
     def test_popen_uses_explicit_utf8_encoding(self) -> None:
         """Subprocess output must be decoded as UTF-8 on every platform.
 

@@ -327,7 +327,7 @@ Para cambiarla: `export SUB_AGENTS_DIR=/custom/path`
 | `--agent` | Sí* | Nombre de una definición incluida en `--list` |
 | `--prompt` | Sí* | Descripción de la tarea que se delegará |
 | `--cwd` | Sí* | Directorio de trabajo como ruta absoluta |
-| `--timeout` | No | Tiempo límite en milisegundos; valor predeterminado: 600000 |
+| `--timeout` | No | Tiempo límite en milisegundos, o con unidad como `600s` / `10m`; valor predeterminado: 600000 |
 | `--cli` | No | Fuerza una CLI: `codex`, `claude`, `cursor-agent`, `glm`, `kimi`, `grok`, `antigravity`, `gemini`, `opencode`, `command-code` |
 
 \* Obligatorio cuando no se utiliza `--list`.

@@ -182,6 +182,15 @@ def work(root: Path, task_id: str) -> None:
         missing = [name for name in expected if not (cwd / name).is_file()]
         text = response.get("result")
         has_body = isinstance(text, str) and bool(text.strip())
+        check: dict[str, object] = {
+            "has_body": has_body,
+            "missing_files": missing,
+            "status": "ready_for_review" if has_body and not missing else "needs_attention",
+        }
+        # A silent backend and a truncated one need different corrections, so say which.
+        metadata = response.get("metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("stdout_chars"), int):
+            check["stdout_chars"] = metadata["stdout_chars"]
         artifacts = evidence(task, cwd, task_dir)
         (task_dir / "result.json").write_text(
             json.dumps(
@@ -199,11 +208,7 @@ def work(root: Path, task_id: str) -> None:
             state,
             response=response,
             artifacts=artifacts,
-            output_check={
-                "has_body": has_body,
-                "missing_files": missing,
-                "status": "ready_for_review" if has_body and not missing else "needs_attention",
-            },
+            output_check=check,
             acceptance="pending",
         )
     except Exception as exc:
