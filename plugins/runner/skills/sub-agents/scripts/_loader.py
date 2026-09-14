@@ -151,3 +151,32 @@ def get_agents_dir(args_agents_dir: str | None, args_cwd: str | None) -> str:
         return str(Path(args_cwd) / ".agents")
 
     return str(Path.cwd() / ".agents")
+
+
+def agent_roots(explicit: str | None, cwd: str | None) -> list[str]:
+    """Explicit directories never fall back; otherwise resolve per role name."""
+    selected = explicit or os.environ.get("SUB_AGENTS_DIR")
+    if selected:
+        return [str(Path(selected).expanduser().resolve())]
+    return [
+        str(Path(cwd or Path.cwd()) / ".agents"),
+        str(Path.home() / ".codex" / "worker-agents"),
+        str(Path(__file__).resolve().parent.parent / "defaults"),
+    ]
+
+
+def resolve_agent(name: str, explicit: str | None, cwd: str | None) -> AgentDefinition:
+    for root in agent_roots(explicit, cwd):
+        try:
+            return load_agent(root, name)
+        except FileNotFoundError:
+            continue
+    raise FileNotFoundError(f"Agent {name!r} not found in {agent_roots(explicit, cwd)}")
+
+
+def discover_agents(explicit: str | None, cwd: str | None) -> list[dict[str, str]]:
+    agents: dict[str, dict[str, str]] = {}
+    for root in agent_roots(explicit, cwd):
+        for item in list_agents(root):
+            agents.setdefault(item["name"], {**item, "directory": root})
+    return sorted(agents.values(), key=lambda item: item["name"])

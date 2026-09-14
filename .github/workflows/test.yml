@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         # Boundaries of the supported range (requires-python = ">=3.9"); the
         # floor catches accidental newer-syntax usage, the ceiling catches
         # deprecations. Intermediate minors rarely surface unique issues.

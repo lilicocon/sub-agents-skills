@@ -1,51 +1,18 @@
-# Codex-Specific Notes
+# Codex host notes
 
-Prevents sandbox denial, timeout mismatch, and premature termination of quiet nested runs.
+Prefer `tasks.py submit` for long or parallel jobs: it returns an ID immediately,
+so the host shell timeout does not have to span the whole model invocation.
+The scheduler and workers run locally using the CLI's existing login/config.
+Use the permissions already authorized in the session. Do not automatically
+request escalation; diagnose actual launch failures first with `doctor` and logs.
 
-## Permission
+For the legacy `run_subagent.py` synchronous entrypoint, keep the host command
+alive for at least `--timeout` plus a small cleanup allowance (default 600000ms
+plus 5000ms). Poll the same running command rather than launching duplicates.
+Return the JSON payload even when its process exit code is nonzero. `partial`
+contains useful evidence but is not a passed task. Quiet output is normal for
+some backends.
 
-Nested CLIs need access to Codex session state and external CLI binaries.
-Start `run_subagent.py` with escalated sandbox permissions to avoid a known
-fail-then-retry path, including:
-
-- `Operation not permitted`
-- failure to initialize Codex app-server or session state
-- failure to access external CLI binaries
-
-## Timeout
-
-- Script arg: `--timeout 600000`
-- Surrounding tool timeout: at least `600000ms`
-
-Long nested runs are normal. Keep the command attached until one terminal
-condition occurs:
-
-- `run_subagent.py` exits and returns its final JSON response.
-- The process exits before returning valid JSON.
-- The configured timeout expires.
-
-Progress silence is not a terminal condition. Continue waiting on the same
-running command.
-
-## Sub-Agent Execution
-
-When running a sub-agent, operate as a broker: carry one run from start to terminal state.
-
-### Allowed actions
-
-1. Validate the requested agent
-2. Start `run_subagent.py`
-3. Stay attached to that run until a terminal condition occurs
-4. Return the sub-agent result, or the failure/timeout outcome
-
-### If the user asks a question mid-run
-
-Answer briefly, then return to waiting on the same run.
-
-## Common Errors
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `Operation not permitted (os error 1)` | Sandbox restriction | Use escalated permissions |
-| Tool call ends before `--timeout` | Surrounding tool timeout is too short | Allow at least the script timeout |
-| `permission denied` on session files | Sandbox restriction | Use escalated permissions |
+Newly installed/updated plugin code is picked up in a new Codex thread. An
+already running task uses its submitted role snapshot; finish active jobs
+before upgrading or moving the installed plugin directory.

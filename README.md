@@ -1,3 +1,16 @@
+# lilicocon fork: persistent cross-CLI orchestration
+
+This fork adds background tasks, bounded process-tree cancellation, isolated Git
+worktrees, built-in Cursor/Grok roles, and explicit host acceptance. Existing
+synchronous invocations remain supported. See the [Chinese quickstart](README.zh-CN.md)
+and [task command reference](skills/sub-agents/references/task-management.md).
+
+Use `python skills/sub-agents/scripts/tasks.py doctor` for a non-billable local
+check. Run model smoke tests explicitly. Install from `lilicocon/sub-agents-skills`
+to use this fork rather than the upstream version documented below.
+
+---
+
 # Sub-Agents Skills
 
 English | [简体中文](README.zh-CN.md) | [Русский](README.ru.md) | [Deutsch](README.de.md) | [Español](README.es.md)

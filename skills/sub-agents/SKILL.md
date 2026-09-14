@@ -1,158 +1,81 @@
 ---
 name: sub-agents
-description: Run agent definitions as sub-agents. Use when the user names an agent or sub-agent to run, references an agent definition, or delegates a task to an agent.
+description: Delegate investigation, implementation, and review to external CLI agents; manage persistent tasks, parallel worktrees, cancellation, and results from Codex or another host.
 allowed-tools: Bash Read
 ---
 
-# Sub-Agents - External CLI AI Task Delegation
+# External Agent Runner
 
-Spawns external CLI AIs (codex, claude, cursor-agent, glm, kimi, grok, antigravity, gemini, opencode, command-code) as isolated sub-agents with dedicated context.
+Use `{SKILL_DIR}/scripts/tasks.py` (absolute path relative to this file) for managed
+work. The host owns task decomposition, semantic verification and integration.
+Existing synchronous calls through `scripts/run_subagent.py` remain supported.
 
-Workflow: discover available definitions, select one from the user request, execute it, and handle the JSON response.
+## Start
 
-## Resources
+Run `python {SKILL_DIR}/scripts/tasks.py doctor` to check Cursor/Grok installations
+and supported flags without sending a model request. This does not verify login.
+List roles with `tasks.py agents --cwd <absolute-project-directory>`.
 
-- **[run_subagent.py](scripts/run_subagent.py)** - Main execution script
-- **[codex.md](references/codex.md)** - Read before first execution from Codex; covers permissions and timeout
+Built-ins: `researcher` (Grok, read-only), `implementer` (Cursor, safe-edit),
+`reviewer` (Grok, read-only). Select the role matching the task unless the user
+specifies a role/backend. Do not ask the user to choose among equivalent roles.
+Custom role lookup and full commands are in [task-management.md](references/task-management.md).
 
-**Script Path**: Use absolute path `{SKILL_DIR}/scripts/run_subagent.py` where `{SKILL_DIR}` is the directory containing this SKILL.md file.
+## Dispatch
 
-## Interpreting User Requests
-
-Extract parameters from user's natural language request:
-
-| Parameter | Source |
-|-----------|--------|
-| `--agent` | Agent name from the user request or workflow selection |
-| `--prompt` | Task instruction part (excluding agent specification) |
-| `--cwd` | Current working directory (absolute path) |
-| `--cli` | Backend override explicitly requested by the user; otherwise omit |
-| `--timeout` | Timeout explicitly requested by the user, converted to milliseconds; otherwise omit (default: 600000) |
-
-**Example**:
-"Run code-reviewer on src/"
-→ `--agent code-reviewer --prompt "Review src/" --cwd $(pwd)`
-
-## Important: Permission and Timeout
-
-This script executes external CLIs that require elevated permissions.
-
-**Before first execution:**
-1. Request elevated permissions via your CLI's tool parameters
-2. Set tool timeout to match `--timeout` argument (default: 600000ms)
-
-**For Codex CLI** (most common permission issues): See [references/codex.md](references/codex.md) for exact JSON parameter format.
-
-## Workflow
-
-### Step 1: List Available Agents
-
-**Always list agents first** to discover available definitions:
+Write a self-contained task prompt to a file: goal, necessary context, exact
+working directory, allowed edits, acceptance criteria, and required evidence.
+Workers do not inherit this conversation. Do not put secrets in prompts.
 
 ```bash
-{SKILL_DIR}/scripts/run_subagent.py --list
+python {SKILL_DIR}/scripts/tasks.py submit --agent implementer \
+  --cwd /absolute/project --prompt-file /absolute/task.txt --expect src/result.py
 ```
 
-Output:
-```json
-{"agents": [{"name": "code-reviewer", "description": "Reviews code..."}], "agents_dir": "/path/.agents"}
-```
+The command returns a task ID immediately. Use `status`, `logs`, and `result`
+with that ID. Keep the same `--state-dir` if explicitly chosen. Read
+[task-management.md](references/task-management.md) before parallel dispatch,
+using dependencies, cancelling, or integrating results.
 
-When the user provides an agent name, select it if it appears in the result. If
-it is absent, report the available definitions and wait for a selection. When
-the result is empty, provide the Agent Definition Format below and wait for the
-user to add a definition.
+- Independent work may run concurrently (default capacity 2). Dependent work
+  waits for its inputs. Use specific, bounded tasks rather than recursively
+  delegating broad goals. Workers must not delegate again.
+- Git write tasks run in separate worktrees from the recorded clean HEAD.
+  Uncommitted input is rejected, never silently stashed or omitted. Do not
+  commit user changes merely to satisfy this check; use a suitable baseline.
+- Submit a review against the implementer's returned `working_directory` so
+  the reviewer sees actual changes. Dependency IDs alone do not change cwd.
+- Non-Git directories serialize overlapping tasks; concurrent writes there
+  are not supported.
+- Background jobs may outlive a chat. Monitor them to a terminal state or
+  explicitly report outstanding IDs. Quiet output is not proof of a hang.
 
-When the user leaves the agent selection open:
+## Verify, then integrate
 
-| Available agents | Action |
-|------------------|--------|
-| 0 | Report that no definitions are available, provide the Agent Definition Format below, and wait |
-| 1 | Select it |
-| 2+ | Show names and descriptions, then ask the user to select one |
+`completed` means the CLI returned a successful protocol result. It does NOT
+mean the user's task is complete. Inspect `output_check`, the final report,
+actual files/diff, source citations, and relevant test results. Progress-only
+responses require a corrective follow-up, even if `has_body` is true.
 
-### Step 2: Execute Agent
+Use `accept ID --verdict accepted|rejected --note "verification evidence"` to
+record the host's decision. Default acceptance is pending. Missing expected
+files or an empty result cannot be accepted. For a rejected deliverable,
+submit a focused correction with `--retry-of ID` and the relevant evidence;
+maximum two correction rounds by default. Do not retry login/config failures
+until the configuration changes. No automatic session replay occurs.
 
-```bash
-{SKILL_DIR}/scripts/run_subagent.py \
-  --agent <name> \
-  --prompt "<task>" \
-  --cwd <absolute-path>
-```
+The host integrates accepted Git changes and resolves conflicts. Runner does
+not merge, push, or delete unintegrated results. `changes.patch` covers tracked
+changes; untracked files are listed separately and remain in the worktree.
+After integration, `cleanup ID` refuses dirty or unmerged worktrees.
 
-Append `--cli <backend>` when the user specifies a backend. Append
-`--timeout <milliseconds>` when the user specifies a timeout.
+## Permissions and compatibility
 
-### Step 3: Handle Response
+Use existing session authorization and host execution policy. Do not request
+blanket escalation or bypass all permissions to get a nested CLI running.
+Cursor plan mode and sandbox are distinct controls; read-only uses both plus
+workspace trust. Other backends retain their own permission mappings.
 
-Parse JSON output and check `status` field:
-
-```json
-{"result": "...", "exit_code": 0, "status": "success", "cli": "claude"}
-```
-
-**By status:**
-
-| status | Meaning | Action |
-|--------|---------|--------|
-| `success` | Task completed | Use `result` directly |
-| `partial` | Timeout but has output | Review partial `result`, may need retry |
-| `error` | Execution failed | Check `error` and `exit_code`; retry after satisfying the reported requirement |
-
-For configuration or credential errors, retry after the required external
-configuration has changed.
-
-If execution fails because `run-agent` is missing, retry with `--cli` set to
-the current client's backend.
-
-**By exit_code** (when status is `error`):
-
-| exit_code | Meaning | Resolution |
-|-----------|---------|------------|
-| 0 | Success | - |
-| 124 | Timeout | Increase `--timeout` or simplify task |
-| 127 | CLI not found | Install required CLI (claude, codex, etc.) |
-| 1 | General error | Check `error` field in response |
-
-## Agent Definition Location
-
-| Priority | Source | Path |
-|----------|--------|------|
-| 1 | Environment variable | `$SUB_AGENTS_DIR` |
-| 2 | Default | `{cwd}/.agents/` |
-
-To customize: `export SUB_AGENTS_DIR=/custom/path`
-
-## Agent Definition Format
-
-Place `.md` files in `.agents/` directory:
-
-```markdown
----
-run-agent: claude
-model: sonnet
-permission: safe-edit
----
-
-# Agent Name
-
-Brief description of agent's purpose.
-
-## Task
-What this agent does.
-
-## Output Format
-How results should be structured.
-```
-
-`run-agent` supplies the backend. Pass `--cli` only as an explicit one-run
-override; execution fails with a corrective error when neither is specified.
-
-**Frontmatter fields:**
-
-| Field | Values | Description |
-|-------|--------|-------------|
-| `run-agent` | `codex`, `claude`, `cursor-agent`, `glm`, `kimi`, `grok`, `antigravity`, `gemini`, `opencode`, `command-code` | Which CLI executes this agent |
-| `model` | Backend-specific model name (optional) | Model passed to the selected CLI; omit to use its configured default |
-| `effort` | Backend/model-specific reasoning level or OpenCode variant (optional) | Advanced: forwarded as an opaque value. Confirm support for the selected model before setting; omit to use its default. Unsupported on `cursor-agent` and `gemini` |
-| `permission` | `read-only`, `safe-edit` (default), `yolo` | `read-only` for investigation, `safe-edit` for workspace edits, or `yolo` to bypass approvals and sandboxing |
+For synchronous calls from Codex, read [codex.md](references/codex.md). The
+synchronous JSON status is `success`, `partial`, or `error`; partial output and
+metadata are evidence to inspect, never automatic success.

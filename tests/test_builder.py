@@ -597,6 +597,7 @@ class TestPermissionFlags:
 
     def test_cursor_flags(self) -> None:
         assert permission_flags("cursor-agent", "read-only") == [
+            "--trust",
             "--mode",
             "plan",
             "--sandbox",

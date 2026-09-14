@@ -14,7 +14,7 @@ PLUGIN_SKILL = REPO_ROOT / "plugins" / "runner" / "skills" / "sub-agents"
 
 
 def compare_dirs(left: Path, right: Path) -> list[str]:
-    comparison = filecmp.dircmp(left, right)
+    comparison = filecmp.dircmp(left, right, ignore=[*filecmp.DEFAULT_IGNORES, "__pycache__"])
     differences: list[str] = []
 
     for name in comparison.left_only:
@@ -38,7 +38,9 @@ def sync() -> None:
         shutil.rmtree(PLUGIN_SKILL)
 
     PLUGIN_SKILL.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(CANONICAL_SKILL, PLUGIN_SKILL)
+    shutil.copytree(
+        CANONICAL_SKILL, PLUGIN_SKILL, ignore=shutil.ignore_patterns("__pycache__", "*.pyc")
+    )
 
 
 def check() -> None:

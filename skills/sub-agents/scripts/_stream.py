@@ -63,7 +63,7 @@ def _grok_json_result(data: StreamData) -> StreamData | None:
     return {
         "type": "result",
         "result": _extract_trailing_json_object(text),
-        "status": "success" if data.get("stopReason") == "EndTurn" else "partial",
+        "status": "success" if data.get("stopReason") in ("EndTurn", "end_turn") else "partial",
         "stop_reason": data.get("stopReason"),
         "session_id": data.get("sessionId"),
     }
@@ -80,6 +80,7 @@ class StreamProcessor:
             raise ValueError(
                 f"Unsupported CLI {cli!r}. Choose one of: {SUPPORTED_CLIS_HELP}."
             ) from e
+        self.metadata: StreamData = {}
         self.result_json: StreamData | None = None
         self.gemini_parts: list[str] = []
         self.codex_messages: list[str] = []
@@ -245,7 +246,22 @@ class StreamProcessor:
         if not isinstance(data, dict):
             return False
 
-        return self._line_processor(self, data)
+        self._capture_metadata(data)
+        completed = self._line_processor(self, data)
+        if self.result_json is not None:
+            self.result_json = {**self.metadata, **self.result_json}
+        return completed
+
+    def _capture_metadata(self, data: StreamData) -> None:
+        for source, target in (
+            ("session_id", "session_id"),
+            ("sessionId", "session_id"),
+            ("thread_id", "session_id"),
+            ("usage", "usage"),
+            ("model", "model"),
+        ):
+            if source in data:
+                self.metadata[target] = data[source]
 
     def process_complete_output(self, output: str) -> bool:
         """Process a complete non-NDJSON payload. Returns True when parsed."""
@@ -257,8 +273,12 @@ class StreamProcessor:
         except json.JSONDecodeError:
             return False
 
-        if isinstance(data, dict) and self.cli == "grok":
-            return self._process_grok_line(data)
+        if isinstance(data, dict):
+            self._capture_metadata(data)
+            completed = self._line_processor(self, data)
+            if self.result_json is not None:
+                self.result_json = {**self.metadata, **self.result_json}
+            return completed
 
         return False
 

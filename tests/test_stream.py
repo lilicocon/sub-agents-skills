@@ -155,6 +155,7 @@ class TestStreamProcessor:
             '"stopReason":"end_turn","finalText":"DONE","usage":{},"durationMs":12}'
         )
         assert processor.get_result() == {
+            "usage": {},
             "type": "result",
             "result": "DONE",
             "status": "success",
@@ -169,6 +170,7 @@ class TestStreamProcessor:
             '"finalText":"progress","usage":{},"durationMs":12}'
         )
         assert processor.get_result() == {
+            "usage": {},
             "type": "result",
             "result": "progress",
             "status": "partial",
@@ -182,6 +184,7 @@ class TestStreamProcessor:
             '"error":"Not authenticated","usage":{},"durationMs":2}'
         )
         assert processor.get_result() == {
+            "usage": {},
             "type": "result",
             "result": "",
             "status": "error",
@@ -324,3 +327,11 @@ class TestExtractTrailingJsonObject:
         text = "{x " * 20000 + "}"
         assert _extract_trailing_json_object(text) == text
         assert len(calls) <= 1
+
+
+def test_grok_current_end_turn_spelling() -> None:
+    processor = StreamProcessor("grok")
+    assert processor.process_line('{"text":"done","stopReason":"end_turn","sessionId":"s"}')
+    result = processor.get_result()
+    assert result is not None
+    assert result["status"] == "success"

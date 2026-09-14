@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import queue
 import shutil
@@ -7,10 +9,13 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import TypedDict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import IO, Callable, TypedDict
 
 from _builder import AgentInvocation, ProcessInvocation, build_invocation_args
 from _constants import DEFAULT_TIMEOUT_MS
+from _process import ProcessTree, launch
 from _stream import StreamData, StreamProcessor
 
 
@@ -27,6 +32,7 @@ class AgentResponse(_AgentResponseFields, total=False):
     """The JSON contract returned to the caller; ``error`` is present on failure."""
 
     error: str
+    metadata: dict[str, object]
 
 
 def _result_value(result: StreamData | None) -> object:
@@ -37,7 +43,7 @@ def _result_value(result: StreamData | None) -> object:
 
 
 # SIGTERM may be reported as 143 or -15.
-_SUCCESS_EXIT_CODES = (0, 143, -15)
+_SUCCESS_EXIT_CODES = (0,)
 
 _CURSOR_AUTH_ERROR_PHRASES = (
     "authentication required",
@@ -158,134 +164,206 @@ def build_final_response(  # noqa: PLR0913
         "status": status,
         "cli": cli,
     }
+    metadata: dict[str, object] = {
+        key: result[key]
+        for key in ("session_id", "stop_reason", "usage", "model")
+        if result and key in result
+    }
+    if metadata:
+        response["metadata"] = metadata
     if status == "error":
         response["error"] = _error_message(response, result, stderr)
     return response
 
 
-# Bound captured output to prevent an unending stream from exhausting memory.
+# Caps apply even after terminal events; queues and individual reads are bounded.
 _MAX_STDOUT_CHARS = 64 * 1024 * 1024
+_MAX_LINE_CHARS = 4 * 1024 * 1024
+_GRACE_SECONDS = 1.0
 
 
-def _spawn_reader(process: subprocess.Popen[str]) -> queue.Queue[str | None]:
-    """Read stdout in a daemon thread so the main loop can enforce timeouts."""
-    line_q: queue.Queue[str | None] = queue.Queue()
-    stdout = process.stdout
-    if stdout is None:  # pragma: no cover - the process is always spawned with a pipe
-        raise ValueError("process was spawned without a stdout pipe")
-
-    def reader() -> None:
-        try:
-            for line in iter(stdout.readline, ""):
-                line_q.put(line)
-        finally:
-            line_q.put(None)
-
-    threading.Thread(target=reader, daemon=True).start()
-    return line_q
-
-
-def _timeout_payload(cli: str, processor: StreamProcessor, timeout_ms: int) -> AgentResponse:
-    error = (
-        f"Sub-agent timed out after {timeout_ms} ms. "
-        "Increase --timeout or simplify the task before retrying."
-    )
-    return _partial_response(cli, processor.get_result(), 124, error)
-
-
-def _drain_to_eof(line_q: queue.Queue[str | None], budget_sec: float = 0.5) -> None:
-    """Drain stdout to prevent concurrent reads during ``communicate()``."""
-    deadline = time.monotonic() + budget_sec
-    while time.monotonic() < deadline:
-        try:
-            line = line_q.get(timeout=0.05)
-        except queue.Empty:
-            return
-        if line is None:
-            return
-
-
-def _drive_process(process: subprocess.Popen[str], cli: str, timeout_ms: int) -> AgentResponse:
-    deadline = time.monotonic() + timeout_ms / 1000
-    processor = StreamProcessor(cli)
-    stdout_lines: list[str] = []
-    accumulated_chars = 0
-    line_q = _spawn_reader(process)
-    saw_terminal = False
-
+def _is_json_object(text: str) -> bool:
     try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                process.kill()
-                _drain_to_eof(line_q)
-                process.communicate()
-                return _timeout_payload(cli, processor, timeout_ms)
+        return isinstance(json.loads(text), dict)
+    except json.JSONDecodeError:
+        return False
 
+
+@dataclass
+class ExecutionOptions:
+    cancelled: Callable[[], bool] = lambda: False
+    log_dir: Path | None = None
+    environment: dict[str, str] | None = None
+
+
+def _spawn_reader(
+    stream: IO[str], name: str, output: queue.Queue[tuple[str, str | None]], stop: threading.Event
+) -> threading.Thread:
+    def put(value: str | None) -> None:
+        while not stop.is_set():
             try:
-                line = line_q.get(timeout=remaining)
-            except queue.Empty:
-                process.kill()
-                _drain_to_eof(line_q)
-                process.communicate()
-                return _timeout_payload(cli, processor, timeout_ms)
+                output.put((name, value), timeout=0.05)
+                return
+            except queue.Full:
+                continue
 
-            if line is None:
-                break
-            stdout_lines.append(line)
-            accumulated_chars += len(line)
-            if not saw_terminal and accumulated_chars > _MAX_STDOUT_CHARS:
-                process.kill()
-                _drain_to_eof(line_q)
-                process.communicate()
-                return _error_response(
-                    cli,
-                    1,
-                    f"Sub-agent output exceeded {_MAX_STDOUT_CHARS} characters. "
-                    "Retry with a narrower task.",
-                    partial_result=processor.get_result(),
-                )
-            if not saw_terminal and processor.process_line(line):
-                process.terminate()
-                saw_terminal = True
-
-        # Allow a short graceful-exit window before killing the process.
-        wait_remaining = max(0.1, deadline - time.monotonic())
+    def read() -> None:
         try:
-            _, stderr = process.communicate(timeout=wait_remaining)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            _, stderr = process.communicate()
-            return _timeout_payload(cli, processor, timeout_ms)
+            # readline(size) preserves prompt terminal events without waiting to
+            # fill a block, but bounds memory even when there is no newline.
+            while not stop.is_set():
+                chunk = stream.readline(8192)
+                if not chunk:
+                    break
+                put(chunk)
+        except (OSError, ValueError):
+            pass
+        finally:
+            put(None)
 
-        result = processor.get_result()
-        if result is None:
-            processor.process_complete_output("".join(stdout_lines))
-            result = processor.get_result()
+    thread = threading.Thread(target=read, daemon=True)
+    thread.start()
+    return thread
 
+
+# PLR1702: bounded stream loop and unconditional process cleanup share state.
+def _drive_process(
+    tree: ProcessTree, cli: str, timeout_ms: int, options: ExecutionOptions
+) -> AgentResponse:
+    process = tree.process
+    assert process.stdout is not None and process.stderr is not None
+    output: queue.Queue[tuple[str, str | None]] = queue.Queue(maxsize=64)
+    stop = threading.Event()
+    threads = [
+        _spawn_reader(stream, name, output, stop)
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+    ]
+    processor = StreamProcessor(cli)
+    chunks: list[str] = []
+    stderr = ""
+    pending = ""
+    count = 0
+    eof: set[str] = set()
+    deadline = time.monotonic() + timeout_ms / 1000
+    terminal_at: float | None = None
+    terminated = False
+    failure: tuple[int, str] | None = None
+    saw_json_line = False
+    logs: dict[str, IO[str]] = {}
+    try:  # noqa: PLR1702
+        if options.log_dir:
+            options.log_dir.mkdir(parents=True, exist_ok=True)
+            logs = {
+                name: (options.log_dir / (name + ".log")).open("w", encoding="utf-8")
+                for name in ("stdout", "stderr")
+            }
+        while True:
+            now = time.monotonic()
+            if options.cancelled():
+                failure = (130, "Sub-agent cancelled")
+                break
+            if now >= deadline:
+                failure = (124, f"Sub-agent timed out after {timeout_ms} ms")
+                break
+            if terminal_at is not None and now - terminal_at >= _GRACE_SECONDS:
+                terminated = process.poll() is None
+                break
+            if len(eof) == 2 and process.poll() is not None:
+                break
+            try:
+                name, chunk = output.get(timeout=min(0.05, max(0.001, deadline - now)))
+            except queue.Empty:
+                continue
+            if chunk is None:
+                eof.add(name)
+                if name == "stdout" and pending:
+                    if processor.process_line(pending):
+                        terminal_at = time.monotonic()
+                    pending = ""
+                continue
+            count += len(chunk)
+            if count > _MAX_STDOUT_CHARS:
+                failure = (1, f"Sub-agent output exceeded {_MAX_STDOUT_CHARS} characters")
+                break
+            if name in logs:
+                logs[name].write(chunk)
+                logs[name].flush()
+            if name == "stderr":
+                stderr = (stderr + chunk)[-65536:]
+                continue
+            chunks.append(chunk)
+            pending += chunk
+            if len(pending) > _MAX_LINE_CHARS:
+                failure = (1, "Sub-agent output line exceeded maximum length")
+                break
+            if pending.endswith("\n"):
+                if _is_json_object(pending):
+                    saw_json_line = True
+                if processor.process_line(pending):
+                    terminal_at = time.monotonic()
+                pending = ""
+            if (
+                processor.get_result() is None
+                and not saw_json_line
+                and "}" in chunk
+                and processor.process_complete_output("".join(chunks))
+            ):
+                terminal_at = time.monotonic()
+        if processor.get_result() is None:
+            processor.process_complete_output("".join(chunks))
+        if failure:
+            if failure[0] == 124 and processor.get_result() is not None:
+                terminated = process.poll() is None
+                return build_final_response(
+                    cli=cli,
+                    returncode=process.poll(),
+                    result=processor.get_result(),
+                    stdout_lines=chunks,
+                    stderr=stderr,
+                    terminated_by_us=terminated,
+                )
+            code, error = failure
+            return _partial_response(cli, processor.get_result(), code, error)
         return build_final_response(
             cli=cli,
-            returncode=process.returncode,
-            result=result,
-            stdout_lines=stdout_lines,
+            returncode=process.poll(),
+            result=processor.get_result(),
+            stdout_lines=chunks,
             stderr=stderr,
-            terminated_by_us=saw_terminal,
+            terminated_by_us=terminated,
         )
-    except (OSError, ValueError) as e:
-        process.kill()
-        # Reap before callers clean up per-run resources.
-        process.wait()
-        return _error_response(
-            cli, 1, f"{type(e).__name__}: {e}", partial_result=processor.get_result()
-        )
+    finally:
+        # Always clean descendants, including those keeping inherited pipes open.
+        stop.set()
+        try:
+            tree.stop()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=0.5)
+            tree.stop(force=True)
+            process.wait(timeout=1)
+        finally:
+            tree.close()
+            if process.stdin is not None:
+                process.stdin.close()
+            for thread in threads:
+                thread.join(timeout=0.2)
+            for log in logs.values():
+                log.close()
+            # Don't close a stream from another thread while it is in read().
+            if not any(thread.is_alive() for thread in threads):
+                process.stdout.close()
+                process.stderr.close()
 
 
-def _build_proc_env(env_override: dict[str, str | None] | None) -> dict[str, str] | None:
+def _build_proc_env(
+    env_override: dict[str, str | None] | None,
+    base: dict[str, str] | None = None,
+) -> dict[str, str] | None:
     """Apply child environment overrides; ``None`` removes a variable."""
-    if not env_override:
+    if not env_override and base is None:
         return None
-    proc_env = {**os.environ}
-    for key, value in env_override.items():
+    proc_env = dict(os.environ if base is None else base)
+    for key, value in (env_override or {}).items():
         if value is None:
             proc_env.pop(key, None)
         else:
@@ -293,42 +371,26 @@ def _build_proc_env(env_override: dict[str, str | None] | None) -> dict[str, str
     return proc_env
 
 
-def _spawn_and_drive(
+# PLR0913: keep the existing adapter inputs and add optional runtime controls.
+def _spawn_and_drive(  # noqa: PLR0913
     process_invocation: ProcessInvocation,
     inv: AgentInvocation,
     proc_env: dict[str, str] | None,
     timeout_ms: int,
+    options: ExecutionOptions | None = None,
 ) -> AgentResponse:
     command, args = process_invocation.command, process_invocation.args
-    cli, cwd = inv.cli, inv.cwd
     try:
-        # Prevent CLIs from waiting for interactive input.
-        # S603: command is a literal from build_command()'s closed set, and args
-        # go through argv with shell=False, so no prompt text reaches a shell.
-        process = subprocess.Popen(  # noqa: S603
-            [command, *args],
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            # CLI streams are UTF-8 regardless of host locale.
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            env=proc_env,
-        )
+        tree = launch([command, *args], inv.cwd, proc_env)
+        return _drive_process(tree, inv.cli, timeout_ms, options or ExecutionOptions())
     except FileNotFoundError:
         return _error_response(
-            cli,
+            inv.cli,
             127,
-            f"CLI unavailable: {command!r} was not found on PATH. "
-            "Install it or select another backend.",
+            f"CLI unavailable: {command!r} was not found on PATH. Install it or select another backend.",
         )
-    except OSError as e:
-        return _error_response(cli, 1, f"{type(e).__name__}: {e}")
-
-    return _drive_process(process, cli, timeout_ms)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        return _error_response(inv.cli, 1, f"{type(e).__name__}: {e}")
 
 
 def _isolated_opencode_env(
@@ -354,19 +416,27 @@ def _isolated_opencode_env(
     return {**(env_override or {}), "XDG_DATA_HOME": data_home, "XDG_STATE_HOME": state_home}
 
 
-def execute_agent(inv: AgentInvocation, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> AgentResponse:
+def execute_agent(
+    inv: AgentInvocation,
+    timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    options: ExecutionOptions | None = None,
+) -> AgentResponse:
+    if timeout_ms <= 0:
+        raise ValueError("timeout must be positive")
+    options = options or ExecutionOptions()
     process_invocation = build_invocation_args(inv)
 
     if inv.cli == "opencode":
         temp_dir = tempfile.mkdtemp(prefix="subagent-opencode-")
         try:
             proc_env = _build_proc_env(
-                _isolated_opencode_env(process_invocation.env_override, temp_dir)
+                _isolated_opencode_env(process_invocation.env_override, temp_dir),
+                options.environment,
             )
-            return _spawn_and_drive(process_invocation, inv, proc_env, timeout_ms)
+            return _spawn_and_drive(process_invocation, inv, proc_env, timeout_ms, options)
         finally:
             # _spawn_and_drive reaps the process before returning.
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    proc_env = _build_proc_env(process_invocation.env_override)
-    return _spawn_and_drive(process_invocation, inv, proc_env, timeout_ms)
+    proc_env = _build_proc_env(process_invocation.env_override, options.environment)
+    return _spawn_and_drive(process_invocation, inv, proc_env, timeout_ms, options)

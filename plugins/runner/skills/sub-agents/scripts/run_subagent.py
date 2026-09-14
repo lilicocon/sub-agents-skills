@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _builder import AgentInvocation
 from _constants import DEFAULT_TIMEOUT_MS, SUPPORTED_CLIS_HELP
 from _executor import execute_agent
-from _loader import get_agents_dir, list_agents, load_agent
+from _loader import discover_agents, get_agents_dir, resolve_agent
 
 
 def _print_error(error: str, exit_code: int = 1, cli: str | None = None) -> None:
@@ -42,7 +42,7 @@ def main() -> None:
 
     if args.list:
         agents_dir = get_agents_dir(args.agents_dir, args.cwd)
-        agents = list_agents(agents_dir)
+        agents = discover_agents(args.agents_dir, args.cwd)
         print(json.dumps({"agents": agents, "agents_dir": agents_dir}, ensure_ascii=False))
         sys.exit(0)
 
@@ -65,7 +65,7 @@ def main() -> None:
     agents_dir = get_agents_dir(args.agents_dir, args.cwd)
 
     try:
-        agent = load_agent(agents_dir, args.agent)
+        agent = resolve_agent(args.agent, args.agents_dir, args.cwd)
     except (FileNotFoundError, ValueError) as e:
         _print_error(str(e))
         sys.exit(1)

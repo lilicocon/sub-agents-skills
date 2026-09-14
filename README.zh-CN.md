@@ -1,3 +1,37 @@
+# lilicocon 定制版：Codex 统一调度
+
+本 fork 在原版同步 Runner 上增加持久任务、并行隔离、取消和独立验收。
+内置 Grok 调查 / Cursor 实现 / Grok 审查角色；无需先创建角色文件。
+
+安装你的 fork（发布更新后）：
+
+```bash
+codex plugin marketplace add lilicocon/sub-agents-skills
+codex plugin add runner@sub-agents-skills
+```
+
+本地开发版本可以先注册本仓库目录，然后安装同名插件。重启或新开 Codex
+会话，输入 `$runner:sub-agents` 并描述任务。CLI 登录需要预先完成。
+
+源码直接运行：
+
+```bash
+python3 skills/sub-agents/scripts/tasks.py doctor
+python3 skills/sub-agents/scripts/tasks.py agents
+python3 skills/sub-agents/scripts/tasks.py submit --agent researcher --cwd /absolute/project --prompt "调查这个问题并提供证据"
+python3 skills/sub-agents/scripts/tasks.py status TASK_ID
+python3 skills/sub-agents/scripts/tasks.py result TASK_ID
+```
+
+默认并发 2；Git 写任务使用独立 worktree，拒绝静默丢弃未提交修改。
+完成状态不等于通过验收：Codex 检查结果、运行相关测试后记录验收并集成。
+原版 `run_subagent.py` 参数和 JSON 字段继续支持。
+
+完整命令、状态、跨平台行为和故障处理见
+[任务管理说明](skills/sub-agents/references/task-management.md)。
+
+---
+
 # Sub-Agents Skills
 
 [English](README.md) | 简体中文 | [Русский](README.ru.md) | [Deutsch](README.de.md) | [Español](README.es.md)

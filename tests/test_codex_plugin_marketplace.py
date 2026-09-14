@@ -80,7 +80,7 @@ def test_manifest_versions_match_project_version() -> None:
 
     for manifest_path in manifest_paths:
         manifest = json.loads(manifest_path.read_text())
-        assert manifest["version"] == project_version
+        assert manifest["version"].split("+", 1)[0] == project_version
 
     marketplace = json.loads((REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text())
     [plugin] = marketplace["plugins"]

@@ -20,6 +20,45 @@ from _executor import AgentResponse, _build_proc_env, build_final_response, exec
 from run_subagent import main
 
 
+@pytest.fixture(autouse=True)
+def pipe_mocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    import _executor
+    from _process import launch as original
+
+    def launch_mock(command: list[str], cwd: str, env: dict[str, str] | None) -> object:
+        if not isinstance(subprocess.Popen, MagicMock):
+            return original(command, cwd, env)
+        process = subprocess.Popen(  # noqa: S603
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        process.stderr.readline.return_value = ""
+        process.poll.side_effect = lambda: process.returncode
+        tree = MagicMock()
+        tree.process = process
+
+        def stop(*, force: bool = False) -> None:
+            if force:
+                process.kill()
+            else:
+                process.terminate()
+
+        tree.stop.side_effect = stop
+        return tree
+
+    monkeypatch.setattr(_executor, "launch", launch_mock)
+
+
 class TestBuildProcEnv:
     def test_none_returns_none(self) -> None:
         assert _build_proc_env(None) is None
@@ -41,6 +80,11 @@ class TestBuildProcEnv:
         assert "ANTHROPIC_API_KEY" not in env
         assert env["ANTHROPIC_AUTH_TOKEN"] == "zai"
 
+    def test_base_environment_replaces_process_env(self) -> None:
+        with patch.dict("os.environ", {"EXISTING": "old", "SECRET": "no"}, clear=True):
+            env = _build_proc_env(None, {"EXISTING": "submit", "PATH": "/bin"})
+        assert env == {"EXISTING": "submit", "PATH": "/bin"}
+
 
 class TestBuildFinalResponse:
     """Status determination from (returncode, parsed result, stdout, stderr)."""
@@ -51,12 +95,12 @@ class TestBuildFinalResponse:
         )
         assert r == {"result": "ok", "exit_code": 0, "status": "success", "cli": "codex"}
 
-    def test_sigterm_with_result_is_success(self) -> None:
-        # CLI was terminated after the result event — that's still success
+    def test_external_sigterm_with_result_is_partial(self) -> None:
+        # A signal alone does not prove that the runner initiated termination.
         r = build_final_response(
             cli="claude", returncode=143, result={"result": "ok"}, stdout_lines=[], stderr=""
         )
-        assert r["status"] == "success"
+        assert r["status"] == "partial"
         assert r["exit_code"] == 143
 
     def test_returncode_none_treated_as_failure(self) -> None:
@@ -382,7 +426,7 @@ class TestExecuteAgent:
         assert "exceeded" in result["error"]
         assert mock_process.kill.called
 
-    def test_stdout_cap_does_not_override_completed_result(self) -> None:
+    def test_stdout_cap_applies_after_completed_result(self) -> None:
         mock_process = MagicMock()
         flood = ['{"type": "noise", "data": "' + ("x" * 180) + '"}\n'] * 20
         mock_process.stdout.readline.side_effect = [
@@ -401,10 +445,9 @@ class TestExecuteAgent:
                     AgentInvocation(cli="codex", prompt="x", cwd="/tmp"),
                     timeout_ms=10000,
                 )
-        assert result["status"] == "success"
+        assert result["status"] == "partial"
         assert result["result"] == "DONE"
-        assert mock_process.terminate.called
-        assert not mock_process.kill.called
+        assert mock_process.kill.called
 
     def test_timeout_when_cli_blocks_without_output(self) -> None:
         """A CLI that produces no output and never exits must be killed by the deadline.
@@ -417,7 +460,7 @@ class TestExecuteAgent:
         mock_process = MagicMock()
         kill_event = threading.Event()
 
-        def blocking_readline() -> str:
+        def blocking_readline(size: int = -1) -> str:
             kill_event.wait(timeout=5)
             return ""
 
@@ -467,7 +510,7 @@ class TestExecuteAgent:
         assert popen_kwargs["encoding"] == "utf-8"
         assert popen_kwargs["errors"] == "replace"
 
-    def test_windows_terminate_exit_code_still_reports_success(self) -> None:
+    def test_external_nonzero_after_result_is_partial(self) -> None:
         """End-to-end Windows simulation: a complete result then exit code 1.
 
         On Windows the broker calls terminate() after parsing the terminal
@@ -489,7 +532,7 @@ class TestExecuteAgent:
                 AgentInvocation(cli="codex", prompt="x", cwd="/tmp"),
                 timeout_ms=5000,
             )
-        assert result["status"] == "success"
+        assert result["status"] == "partial"
         assert result["result"] == "DONE"
 
     def test_gemini_passes_env_with_agent_file(self) -> None:
@@ -668,7 +711,7 @@ class TestOpencodeDataDirIsolation:
 
         process.communicate.side_effect = OSError("pipe failure")
 
-        def wait() -> int:
+        def wait(timeout: float | None = None) -> int:
             # The error path must reap the child before execute_agent's finally
             # block removes the per-invocation directory.
             assert os.path.isdir(captured["temp_dir"])
@@ -690,7 +733,8 @@ class TestOpencodeDataDirIsolation:
 
         assert result["status"] == "error"
         assert process.kill.called
-        process.wait.assert_called_once_with()
+        assert process.wait.called
+        assert all(call.kwargs.get("timeout") is not None for call in process.wait.call_args_list)
         assert not os.path.exists(captured["temp_dir"])
 
     def test_auth_json_is_copied_into_isolated_data_home(self) -> None:
@@ -959,4 +1003,9 @@ class TestMainEndToEnd:
                         main()
             payload = json.loads(buf.getvalue().strip())
             assert exc_info.value.code == 0
-            assert payload["agents"] == [{"name": "a", "description": "one."}]
+            assert any(
+                item["name"] == "a" and item["description"] == "one." for item in payload["agents"]
+            )
+            assert {"researcher", "implementer", "reviewer"}.issubset(
+                {item["name"] for item in payload["agents"]}
+            )
