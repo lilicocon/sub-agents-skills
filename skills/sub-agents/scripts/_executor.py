@@ -83,15 +83,24 @@ def _cursor_legacy_key_guidance(
     )
 
 
-def _timeout_error(error: str, stdout_chars: int) -> str:
+# Below this, a silent run says more about the deadline than about the backend.
+_SHORT_TIMEOUT_MS = 60000
+
+
+def _timeout_error(error: str, stdout_chars: int, timeout_ms: int) -> str:
     """Say whether a timed-out backend was producing anything when it was killed."""
     if stdout_chars:
         return f"{error} after emitting {stdout_chars} characters"
-    return (
+    detail = (
         f"{error} without emitting any output. Backends invoked with a non-streaming "
-        "output format buffer the whole reply until the run ends, so nothing survives "
-        "the deadline and a longer timeout alone rarely helps. Narrow the task, or "
-        "supply the files the worker would otherwise search for in the prompt itself."
+        "output format buffer the whole reply until the run ends, so a killed run "
+        "leaves nothing behind"
+    )
+    if timeout_ms < _SHORT_TIMEOUT_MS:
+        return f"{detail}, and a deadline this short may be the whole reason."
+    return (
+        f"{detail}. Check whether the task can be narrowed, or the files the worker "
+        "would otherwise search for supplied in the prompt itself."
     )
 
 
@@ -340,7 +349,7 @@ def _drive_process(
                 )
             code, error = failure
             if code == 124:
-                error = _timeout_error(error, stdout_chars)
+                error = _timeout_error(error, stdout_chars, timeout_ms)
             return _partial_response(
                 cli, processor.get_result(), code, error, stdout_chars=stdout_chars
             )

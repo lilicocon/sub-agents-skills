@@ -1,6 +1,6 @@
 {
   "name": "runner",
-  "version": "0.13.4+codex.20260914202644",
+  "version": "0.13.5+codex.20260914204022",
   "description": "Run agent definitions as sub-agents across multiple AI coding CLIs.",
   "author": {
     "name": "Shinsuke Kagawa",

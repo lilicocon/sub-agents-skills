@@ -451,8 +451,27 @@ def test_parse_timeout_rejects_seconds_typed_as_milliseconds(text: str) -> None:
     Regression for real runs submitted with ``--timeout 600``: the task died after
     0.6 s and was recorded as ``timed_out`` with no hint that the unit was wrong.
     """
-    with pytest.raises(ValueError, match="milliseconds"):
+    with pytest.raises(ValueError, match="bare number is milliseconds"):
         parse_timeout_ms(text)
+
+
+@pytest.mark.parametrize(("text", "expected"), [("500ms", 500), ("1ms", 1), ("999ms", 999)])
+def test_parse_timeout_keeps_a_united_sub_second_value(text: str, expected: int) -> None:
+    """A written unit is unambiguous, so the mix-up guard must not apply to it.
+
+    Rejecting ``500ms`` also told the user to write ``'500s'`` -- a thousand times
+    the deadline they asked for, which is worse than the value they typed.
+    """
+    assert parse_timeout_ms(text) == expected
+
+
+def test_parse_timeout_message_offers_both_readings_and_reads_naturally() -> None:
+    with pytest.raises(ValueError, match="bare number") as caught:
+        parse_timeout_ms("1")
+    message = str(caught.value)
+    assert "write '1s' for 1 second," in message  # not "1 seconds"
+    assert "1 millisecond," in message  # not "1 milliseconds"
+    assert "'1ms'" in message  # the way to keep a deliberate short deadline
 
 
 @pytest.mark.parametrize("text", ["0", "-1", "abc", "", "1.5s"])

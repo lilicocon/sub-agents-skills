@@ -524,6 +524,10 @@ class TestExecuteAgent:
         assert result["exit_code"] == 124
         assert "without emitting any output" in result["error"]
         assert result["metadata"] == {"stdout_chars": 0}
+        # A 300 ms deadline explains the silence by itself; saying a longer timeout
+        # would not help would be wrong here.
+        assert "deadline this short may be the whole reason" in result["error"]
+        assert "narrowed" not in result["error"]
 
     def test_truncated_timeout_reports_how_much_arrived(self) -> None:
         """A backend cut off mid-stream is a different failure from a silent one."""
@@ -565,6 +569,14 @@ class TestExecuteAgent:
         emitted = metadata["stdout_chars"]
         assert isinstance(emitted, int)
         assert emitted > 0
+
+    def test_long_silent_timeout_suggests_narrowing_without_asserting(self) -> None:
+        """Past a usable deadline the advice changes, but stays a check, not a verdict."""
+        from _executor import _timeout_error
+
+        long_deadline = _timeout_error("timed out", 0, 600000)
+        assert "Check whether the task can be narrowed" in long_deadline
+        assert "rarely helps" not in long_deadline
 
     def test_popen_uses_explicit_utf8_encoding(self) -> None:
         """Subprocess output must be decoded as UTF-8 on every platform.

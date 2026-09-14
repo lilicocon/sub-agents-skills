@@ -39,7 +39,8 @@ not run, and keep one task to one narrow area. Give review tasks a fixed output
 template; without one, backends return progress narration instead of findings.
 
 `--timeout` is milliseconds. It also accepts a united value such as `600s` or
-`10m`; a value under one second is rejected rather than expiring on arrival.
+`10m`. A bare number under one second is rejected as a seconds/milliseconds
+mix-up; write the unit to ask for a short deadline deliberately.
 
 ```bash
 python {SKILL_DIR}/scripts/tasks.py submit --agent implementer \
@@ -73,9 +74,9 @@ responses require a corrective follow-up, even if `has_body` is true.
 
 A timed-out task reporting `stdout_chars: 0` produced nothing at all: backends
 using a non-streaming output format buffer the whole reply and lose it at the
-deadline. Raising the timeout alone rarely changes that outcome; narrow the
-scope or inline the sources instead. A nonzero count means the reply was
-genuinely cut off, which a longer deadline can fix.
+deadline. Rule out too short a deadline first, then narrow the scope or inline
+the sources. A nonzero count means the reply was genuinely cut off, which a
+longer deadline can fix.
 
 Use `accept ID --verdict accepted|rejected --note "verification evidence"` to
 record the host's decision. Default acceptance is pending. Missing expected

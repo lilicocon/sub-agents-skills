@@ -18,7 +18,7 @@ repository and on a local filesystem (SQLite/locks are not designed for network 
 | `doctor` | Versions and supported flags; no model call or auth assertion |
 | `agents` | `--cwd PATH`, optional `--agents-dir PATH` |
 | `submit` | `--agent ROLE --cwd PATH --prompt-file FILE` (or `--prompt TEXT`) |
-| `submit` options | `--cli BACKEND`, `--timeout MS` (or `600s`/`10m`; under 1s rejected), repeated `--expect RELATIVE_FILE`, repeated `--depends-on ID`, `--retry-of ID` |
+| `submit` options | `--cli BACKEND`, `--timeout MS` (or `600s`/`10m`; a bare value under 1s rejected), repeated `--expect RELATIVE_FILE`, repeated `--depends-on ID`, `--retry-of ID` |
 | `configure` | `--max-parallel N` (1–32, default 2, per state directory) |
 | `status ID` | State, elapsed time, latest log activity, cwd and verification status |
 | `list` | Task summaries; also restarts a stopped scheduler if necessary |
@@ -73,8 +73,8 @@ are separate (Git operations have their own 30-second limits).
 CLI completion, output checks, and host acceptance are independent:
 - `output_check`: body present, expected files present, ready_for_review/needs_attention.
   On a timeout it also carries `stdout_chars`, the number of characters the
-  backend actually emitted. Zero means it produced nothing before the deadline
-  and a longer timeout alone is unlikely to help.
+  backend actually emitted. Zero means it produced nothing before the deadline;
+  rule out too short a deadline before narrowing the task.
 - `acceptance`: pending/accepted/rejected. The program cannot infer correctness
   from the wording of an LLM response; the host must review it.
 
